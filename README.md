@@ -131,7 +131,7 @@ CONFIG はパラメータを即時変更できません。
 | `PROPOSER_ROLE` | Proposal 作成 |
 | `APPROVER_ROLE` | Proposal 承認 |
 | `EXECUTOR_ROLE` | 承認済み Proposal の実行 |
-| `GUARDIAN_ROLE` | **緊急停止のみ**（解除不可） |
+| `GUARDIAN_ROLE` | **緊急停止**（解除不可）と進行中の提案（助成・運用益認定・解散・設定変更）のキャンセル |
 | `CONFIG_ROLE` | 上限・承認数・Timelock・有効期間の**提案**、停止解除、運用益認定・解散の開始 |
 
 `AccessControlDefaultAdminRules` により Default Admin の移管に遅延を設定します。本番では **Safe や TimelockController** を Admin / Config に指定してください。
@@ -198,19 +198,20 @@ export APPROVER=0x...
 export EXECUTOR=0x...
 export GUARDIAN=0x...
 export CONFIG=0x...          # 省略時は ADMIN
-export USE_MOCK_JPYC=true    # ローカルでは Mock JPYC をデプロイ
+export USE_MOCK_JPYC=true    # ローカル検証専用。省略時は false(本番 JPYC を要求)
 
 forge script script/DeployFundOS.s.sol:DeployFundOS \
   --rpc-url $RPC_URL \
   --broadcast
 ```
 
-本番 JPYC を使う場合:
+本番 JPYC を使う場合(`USE_MOCK_JPYC` はデフォルトで false なので指定不要):
 
 ```bash
-export USE_MOCK_JPYC=false
 export JPYC_TOKEN=0xE7C3D8C9a439feDe00D2600032D5dB0Be71C3c29
 ```
+
+Mock JPYC は誰でも無制限に mint できるテスト専用トークンです。明示的に `USE_MOCK_JPYC=true` を指定した場合のみデプロイされます。
 
 `.env.example` を参照してください。**実在の秘密鍵やアドレスをコードに埋め込まないでください。**
 

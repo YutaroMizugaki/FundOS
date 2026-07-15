@@ -305,6 +305,65 @@ contract FundOSTest is Test {
         assertEq(controller.spendableGrantBudget(), BUDGET);
     }
 
+    function test_guardian_can_cancel_grant_proposal() public {
+        uint256 grant = JPYC.yen(80_000);
+        uint256 id = _createProposal(grant);
+        _approveTwice(id);
+        assertEq(controller.reservedGrantBudget(), grant);
+
+        vm.prank(guardian);
+        controller.cancelGrantProposal(id);
+
+        assertEq(controller.reservedGrantBudget(), 0);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Cancelled)
+        );
+    }
+
+    function test_final_grant_approval_beyond_expiry_reverts() public {
+        // Validity 14 days, timelock 2 days: a threshold-reaching approval on day 13
+        // would set executableAt past expiry, so it must revert instead of creating
+        // a proposal that can never be executed.
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        vm.prank(approver1);
+        controller.approveGrantProposal(id);
+
+        vm.warp(block.timestamp + 13 days);
+        vm.prank(approver2);
+        vm.expectRevert(GrantController.TimelockBeyondExpiry.selector);
+        controller.approveGrantProposal(id);
+    }
+
+    function test_final_yield_approval_beyond_expiry_reverts() public {
+        uint256 amount = JPYC.yen(10_000);
+        jpyc.mint(address(treasury), amount);
+        vm.prank(config);
+        uint256 allocationId = controller.createYieldAllocation(amount, bytes32(0), "");
+        vm.prank(approver1);
+        controller.approveYieldAllocation(allocationId);
+
+        vm.warp(block.timestamp + 13 days);
+        vm.prank(approver2);
+        vm.expectRevert(GrantController.TimelockBeyondExpiry.selector);
+        controller.approveYieldAllocation(allocationId);
+    }
+
+    function test_final_dissolution_approval_beyond_expiry_reverts() public {
+        // Validity 90 days, delay 30 days: a threshold-reaching approval on day 61
+        // would set executableAt past expiry.
+        vm.prank(guardian);
+        controller.pause();
+        vm.prank(config);
+        controller.initiateDissolution(keccak256("resolution"), "ipfs://resolution");
+        vm.prank(approver1);
+        controller.approveDissolution();
+
+        vm.warp(block.timestamp + 61 days);
+        vm.prank(approver2);
+        vm.expectRevert(GrantController.TimelockBeyondExpiry.selector);
+        controller.approveDissolution();
+    }
+
     function test_grant_reservation_released_on_expire() public {
         uint256 grant = JPYC.yen(80_000);
         uint256 id = _createProposal(grant);
@@ -428,6 +487,53 @@ contract FundOSTest is Test {
         controller.executeConfiguration();
     }
 
+    function _applyConfiguration(uint8 approvals) internal {
+        vm.prank(config);
+        controller.proposeConfiguration(MAX_GRANT, approvals, 2 days, 14 days);
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(config);
+        controller.executeConfiguration();
+    }
+
+    function test_lowering_required_approvals_does_not_affect_existing_proposal() public {
+        _applyConfiguration(3);
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        assertEq(controller.getProposal(id).approvalThreshold, 3);
+
+        _applyConfiguration(2);
+
+        // Two approvals must not satisfy the snapshotted threshold of 3.
+        _approveTwice(id);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Pending)
+        );
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.InvalidProposalStatus.selector);
+        controller.executeGrantProposal(id);
+
+        address approver3 = makeAddr("approver3");
+        vm.prank(admin);
+        controller.grantRole(keccak256("APPROVER_ROLE"), approver3);
+        vm.prank(approver3);
+        controller.approveGrantProposal(id);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Approved)
+        );
+    }
+
+    function test_raising_required_approvals_does_not_affect_existing_proposal() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        assertEq(controller.getProposal(id).approvalThreshold, 2);
+
+        _applyConfiguration(3);
+
+        _approveTwice(id);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Approved)
+        );
+    }
+
     function test_config_weakening_waits_current_timelock() public {
         // Raise timelock to 7 days, then a later proposal to weaken it must wait 7 days.
         vm.prank(config);
@@ -485,6 +591,44 @@ contract FundOSTest is Test {
         vm.prank(address(controller));
         vm.expectRevert(TreasuryVault.JPYCRescueForbidden.selector);
         treasury.rescueToken(IERC20(address(jpyc)), admin, 1);
+    }
+
+    function test_admin_rescues_stray_token_via_controller() public {
+        MockJPYC stray = new MockJPYC();
+        stray.mint(address(treasury), JPYC.yen(1_000));
+
+        vm.prank(admin);
+        controller.rescueToken(IERC20(address(stray)), admin, JPYC.yen(1_000));
+
+        assertEq(stray.balanceOf(admin), JPYC.yen(1_000));
+        assertEq(stray.balanceOf(address(treasury)), 0);
+    }
+
+    function test_rescue_works_while_paused() public {
+        MockJPYC stray = new MockJPYC();
+        stray.mint(address(treasury), 1);
+
+        vm.prank(guardian);
+        controller.pause();
+
+        vm.prank(admin);
+        controller.rescueToken(IERC20(address(stray)), admin, 1);
+        assertEq(stray.balanceOf(admin), 1);
+    }
+
+    function test_non_admin_cannot_rescue_via_controller() public {
+        MockJPYC stray = new MockJPYC();
+        stray.mint(address(treasury), 1);
+
+        vm.prank(config);
+        vm.expectRevert();
+        controller.rescueToken(IERC20(address(stray)), config, 1);
+    }
+
+    function test_jpyc_rescue_via_controller_reverts() public {
+        vm.prank(admin);
+        vm.expectRevert(TreasuryVault.JPYCRescueForbidden.selector);
+        controller.rescueToken(IERC20(address(jpyc)), admin, 1);
     }
 
     function test_accounting_invariant_holds() public view {

@@ -22,7 +22,9 @@ contract DeployFundOS is Script {
     }
 
     function run() external returns (Deployment memory deployment) {
-        bool useMock = vm.envOr("USE_MOCK_JPYC", true);
+        // Mock JPYC is opt-in only: a forgotten env var must never deploy a
+        // freely mintable token to production.
+        bool useMock = vm.envOr("USE_MOCK_JPYC", false);
         address jpycAddress = useMock ? address(0) : vm.envAddress("JPYC_TOKEN");
 
         address admin = vm.envAddress("ADMIN");

@@ -24,7 +24,7 @@ const treasuryAbi = parseAbi([
 
 const grantControllerAbi = parseAbi([
   "function nextProposalId() view returns (uint256)",
-  "function getProposal(uint256 proposalId) view returns ((address recipient, uint256 amount, bytes32 purposeId, bytes32 evidenceHash, string metadataURI, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 status))",
+  "function getProposal(uint256 proposalId) view returns ((address recipient, uint256 amount, bytes32 purposeId, bytes32 evidenceHash, string metadataURI, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 approvalThreshold, uint8 status))",
   "function nextYieldAllocationId() view returns (uint256)",
   "function getYieldAllocation(uint256 allocationId) view returns ((uint256 amount, bytes32 evidenceHash, string metadataURI, address proposer, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 approvalThreshold, uint8 status))",
   "function getDissolution() view returns ((bytes32 resolutionHash, string metadataURI, address proposer, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 approvalThreshold, uint8 status))",
@@ -68,6 +68,7 @@ type GrantProposal = {
   executableAt: number;
   expiresAt: number;
   approvalCount: number;
+  approvalThreshold: number;
   status: keyof typeof GRANT_STATUS;
 };
 
@@ -154,6 +155,7 @@ async function loadProposals(
       executableAt: Number(proposal.executableAt),
       expiresAt: Number(proposal.expiresAt),
       approvalCount: proposal.approvalCount,
+      approvalThreshold: proposal.approvalThreshold,
       status: statusName(proposal.status),
     });
   }
