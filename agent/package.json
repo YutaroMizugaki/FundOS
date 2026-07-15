@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/run.js",
-    "dev": "tsx src/run.ts"
+    "dev": "tsx src/run.ts",
+    "monitor": "tsx src/run.ts"
   },
   "dependencies": {
     "viem": "^2.21.0"

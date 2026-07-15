@@ -1,0 +1,471 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import {FundConstitution} from "../src/FundConstitution.sol";
+import {TreasuryVault} from "../src/TreasuryVault.sol";
+import {GrantController} from "../src/GrantController.sol";
+import {MockJPYC} from "../src/mocks/MockJPYC.sol";
+import {JPYC} from "../src/constants/JPYC.sol";
+
+contract MaliciousJPYC is MockJPYC {
+    TreasuryVault public target;
+    bool public attackEnabled;
+    bool private _entered;
+
+    function configureAttack(TreasuryVault target_, bool enabled) external {
+        target = target_;
+        attackEnabled = enabled;
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        if (attackEnabled && !_entered) {
+            _entered = true;
+            target.donatePrincipal(1, bytes32(0));
+        }
+        return super.transfer(to, amount);
+    }
+}
+
+contract FundOSTest is Test {
+    MockJPYC jpyc;
+    FundConstitution constitution;
+    TreasuryVault treasury;
+    GrantController controller;
+
+    address admin = makeAddr("admin");
+    address proposer = makeAddr("proposer");
+    address approver1 = makeAddr("approver1");
+    address approver2 = makeAddr("approver2");
+    address executor = makeAddr("executor");
+    address guardian = makeAddr("guardian");
+    address config = makeAddr("config");
+    address donor = makeAddr("donor");
+    address recipient = makeAddr("recipient");
+
+    uint256 constant PRINCIPAL = 5_000_000e18;
+    uint256 constant BUDGET = 1_000_000e18;
+    uint256 constant MAX_GRANT = 2_000_000e18;
+
+    function setUp() public {
+        jpyc = new MockJPYC();
+        constitution = new FundConstitution(
+            "FundOS Test Fund",
+            keccak256("test-purpose"),
+            "ipfs://test",
+            admin,
+            IERC20(address(jpyc))
+        );
+        treasury = new TreasuryVault(constitution);
+        controller = new GrantController(
+            constitution,
+            treasury,
+            admin,
+            proposer,
+            approver1,
+            executor,
+            guardian,
+            config,
+            3 days,
+            MAX_GRANT,
+            2,
+            2 days,
+            14 days
+        );
+
+        bytes32 approverRole = keccak256("APPROVER_ROLE");
+        vm.prank(admin);
+        controller.grantRole(approverRole, approver2);
+
+        jpyc.mint(donor, PRINCIPAL + BUDGET);
+        vm.startPrank(donor);
+        jpyc.approve(address(treasury), type(uint256).max);
+        treasury.donatePrincipal(PRINCIPAL, keccak256("donor-a"));
+        treasury.fundGrantBudget(BUDGET, keccak256("budget-a"));
+        vm.stopPrank();
+    }
+
+    function test_donatePrincipal_increases_balance_and_principal() public {
+        address newDonor = makeAddr("newDonor");
+        uint256 amount = JPYC.yen(100_000);
+        jpyc.mint(newDonor, amount);
+
+        vm.startPrank(newDonor);
+        jpyc.approve(address(treasury), amount);
+        treasury.donatePrincipal(amount, keccak256("donor-b"));
+        vm.stopPrank();
+
+        assertEq(treasury.protectedPrincipal(), PRINCIPAL + amount);
+        assertEq(treasury.totalTreasuryAssets(), PRINCIPAL + BUDGET + amount);
+    }
+
+    function test_fundGrantBudget_increases_available_budget() public {
+        address funder = makeAddr("funder");
+        uint256 amount = JPYC.yen(50_000);
+        jpyc.mint(funder, amount);
+
+        vm.startPrank(funder);
+        jpyc.approve(address(treasury), amount);
+        treasury.fundGrantBudget(amount, keccak256("source-b"));
+        vm.stopPrank();
+
+        assertEq(treasury.availableGrantBudget(), BUDGET + amount);
+    }
+
+    function test_no_withdraw_or_share_token() public view {
+        assertEq(jpyc.balanceOf(donor), 0);
+    }
+
+    function test_donatePrincipal_zero_reverts() public {
+        vm.expectRevert(TreasuryVault.ZeroAmount.selector);
+        treasury.donatePrincipal(0, bytes32(0));
+    }
+
+    function test_donatePrincipal_insufficient_allowance_reverts() public {
+        address poor = makeAddr("poor");
+        jpyc.mint(poor, JPYC.yen(1));
+        vm.startPrank(poor);
+        vm.expectRevert(TreasuryVault.InsufficientAllowance.selector);
+        treasury.donatePrincipal(JPYC.yen(1), bytes32(0));
+        vm.stopPrank();
+    }
+
+    function _createProposal(uint256 amount) internal returns (uint256 id) {
+        vm.prank(proposer);
+        return controller.createGrantProposal(
+            recipient, amount, keccak256("purpose"), keccak256("evidence"), "ipfs://meta"
+        );
+    }
+
+    function _approveTwice(uint256 id) internal {
+        vm.prank(approver1);
+        controller.approveGrantProposal(id);
+        vm.prank(approver2);
+        controller.approveGrantProposal(id);
+    }
+
+    function test_only_proposer_creates_proposal() public {
+        vm.prank(executor);
+        vm.expectRevert();
+        controller.createGrantProposal(recipient, JPYC.yen(10_000), bytes32(0), bytes32(0), "");
+    }
+
+    function test_zero_recipient_reverts() public {
+        vm.prank(proposer);
+        vm.expectRevert(GrantController.InvalidRecipient.selector);
+        controller.createGrantProposal(address(0), JPYC.yen(10_000), bytes32(0), bytes32(0), "");
+    }
+
+    function test_zero_grant_reverts() public {
+        vm.prank(proposer);
+        vm.expectRevert(GrantController.ZeroAmount.selector);
+        controller.createGrantProposal(recipient, 0, bytes32(0), bytes32(0), "");
+    }
+
+    function test_max_grant_exceeded_reverts() public {
+        vm.prank(proposer);
+        vm.expectRevert(GrantController.ExceedsMaxGrantAmount.selector);
+        controller.createGrantProposal(recipient, MAX_GRANT + 1, bytes32(0), bytes32(0), "");
+    }
+
+    function test_only_approver_approves() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        vm.prank(executor);
+        vm.expectRevert();
+        controller.approveGrantProposal(id);
+    }
+
+    function test_self_approval_reverts() public {
+        bytes32 approverRole = keccak256("APPROVER_ROLE");
+        vm.prank(admin);
+        controller.grantRole(approverRole, proposer);
+
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        vm.prank(proposer);
+        vm.expectRevert(GrantController.SelfApprovalForbidden.selector);
+        controller.approveGrantProposal(id);
+    }
+
+    function test_double_approval_reverts() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        vm.startPrank(approver1);
+        controller.approveGrantProposal(id);
+        vm.expectRevert(GrantController.AlreadyApproved.selector);
+        controller.approveGrantProposal(id);
+        vm.stopPrank();
+    }
+
+    function test_insufficient_approvals_blocks_execution() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        vm.prank(approver1);
+        controller.approveGrantProposal(id);
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.InvalidProposalStatus.selector);
+        controller.executeGrantProposal(id);
+    }
+
+    function test_timelock_blocks_execution() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        _approveTwice(id);
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.TimelockNotElapsed.selector);
+        controller.executeGrantProposal(id);
+    }
+
+    function test_expired_proposal_cannot_execute() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        _approveTwice(id);
+        vm.warp(block.timestamp + 15 days);
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.ProposalExpired.selector);
+        controller.executeGrantProposal(id);
+    }
+
+    function test_only_executor_executes() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        _approveTwice(id);
+        vm.warp(block.timestamp + 2 days);
+
+        vm.prank(approver1);
+        vm.expectRevert();
+        controller.executeGrantProposal(id);
+    }
+
+    function test_execute_transfers_exact_amount_and_reduces_budget() public {
+        uint256 grant = JPYC.yen(80_000);
+        uint256 id = _createProposal(grant);
+        _approveTwice(id);
+        vm.warp(block.timestamp + 2 days);
+
+        uint256 principalBefore = treasury.protectedPrincipal();
+        uint256 budgetBefore = treasury.availableGrantBudget();
+
+        vm.prank(executor);
+        controller.executeGrantProposal(id);
+
+        assertEq(jpyc.balanceOf(recipient), grant);
+        assertEq(treasury.availableGrantBudget(), budgetBefore - grant);
+        assertEq(treasury.protectedPrincipal(), principalBefore);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Executed)
+        );
+    }
+
+    function test_executed_proposal_cannot_reexecute() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        _approveTwice(id);
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(executor);
+        controller.executeGrantProposal(id);
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.InvalidProposalStatus.selector);
+        controller.executeGrantProposal(id);
+    }
+
+    function test_cancelled_proposal_cannot_execute() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        vm.prank(proposer);
+        controller.cancelGrantProposal(id);
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.InvalidProposalStatus.selector);
+        controller.executeGrantProposal(id);
+    }
+
+    function test_insufficient_budget_on_execute_reverts() public {
+        uint256 id = _createProposal(BUDGET);
+        _approveTwice(id);
+        vm.warp(block.timestamp + 2 days);
+
+        uint256 id2 = _createProposal(JPYC.yen(1));
+        _approveTwice(id2);
+        vm.warp(block.timestamp + 2 days);
+
+        vm.prank(executor);
+        controller.executeGrantProposal(id);
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.InsufficientGrantBudget.selector);
+        controller.executeGrantProposal(id2);
+    }
+
+    function test_insufficient_budget_on_approval_reverts() public {
+        uint256 id = _createProposal(BUDGET + 1);
+        vm.prank(approver1);
+        vm.expectRevert(GrantController.InsufficientGrantBudget.selector);
+        controller.approveGrantProposal(id);
+    }
+
+    function test_admin_cannot_transfer_jpyc_directly() public {
+        vm.prank(admin);
+        vm.expectRevert(TreasuryVault.OnlyGrantController.selector);
+        treasury.executeGrantTransfer(makeAddr("thief"), JPYC.yen(1));
+    }
+
+    function test_executor_cannot_change_recipient_or_amount() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        _approveTwice(id);
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(executor);
+        controller.executeGrantProposal(id);
+
+        assertEq(jpyc.balanceOf(recipient), JPYC.yen(50_000));
+        assertEq(jpyc.balanceOf(makeAddr("other")), 0);
+    }
+
+    function test_guardian_pauses() public {
+        vm.prank(guardian);
+        controller.pause();
+        assertTrue(controller.paused());
+        assertTrue(treasury.paused());
+    }
+
+    function test_guardian_cannot_unpause() public {
+        vm.prank(guardian);
+        controller.pause();
+
+        vm.prank(guardian);
+        vm.expectRevert(GrantController.GuardianCannotUnpause.selector);
+        controller.unpause();
+    }
+
+    function test_admin_unpauses() public {
+        vm.prank(guardian);
+        controller.pause();
+
+        vm.prank(admin);
+        controller.unpause();
+        assertFalse(controller.paused());
+    }
+
+    function test_pause_blocks_config_update() public {
+        vm.prank(guardian);
+        controller.pause();
+
+        vm.prank(config);
+        vm.expectRevert();
+        controller.updateConfiguration(MAX_GRANT, 2, 2 days, 14 days);
+    }
+
+    function test_pause_blocks_grant_execution() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        _approveTwice(id);
+        vm.warp(block.timestamp + 2 days);
+
+        vm.prank(guardian);
+        controller.pause();
+
+        vm.prank(executor);
+        vm.expectRevert();
+        controller.executeGrantProposal(id);
+    }
+
+    function test_roleless_cannot_manage_roles() public {
+        bytes32 proposerRole = keccak256("PROPOSER_ROLE");
+        vm.prank(donor);
+        vm.expectRevert();
+        controller.grantRole(proposerRole, donor);
+    }
+
+    function test_initial_roles_assigned() public view {
+        assertTrue(controller.hasRole(controller.PROPOSER_ROLE(), proposer));
+        assertTrue(controller.hasRole(controller.APPROVER_ROLE(), approver1));
+        assertTrue(controller.hasRole(controller.APPROVER_ROLE(), approver2));
+        assertTrue(controller.hasRole(controller.EXECUTOR_ROLE(), executor));
+        assertTrue(controller.hasRole(controller.GUARDIAN_ROLE(), guardian));
+        assertTrue(controller.hasRole(controller.CONFIG_ROLE(), config));
+        assertTrue(controller.hasRole(controller.DEFAULT_ADMIN_ROLE(), admin));
+    }
+
+    function test_jpyc_rescue_reverts() public {
+        vm.prank(address(controller));
+        vm.expectRevert(TreasuryVault.JPYCRescueForbidden.selector);
+        treasury.rescueToken(IERC20(address(jpyc)), admin, 1);
+    }
+
+    function test_accounting_invariant_holds() public view {
+        uint256 balance = treasury.totalTreasuryAssets();
+        uint256 accounted = treasury.protectedPrincipal() + treasury.availableGrantBudget();
+        assertGe(balance, accounted);
+        assertEq(treasury.accountingSurplus(), balance - accounted);
+    }
+
+    function test_direct_jpyc_transfer_creates_surplus_without_outflow_path() public {
+        jpyc.mint(address(treasury), JPYC.yen(10_000));
+        assertEq(treasury.accountingSurplus(), JPYC.yen(10_000));
+
+        vm.prank(admin);
+        vm.expectRevert(TreasuryVault.OnlyGrantController.selector);
+        treasury.executeGrantTransfer(admin, 1);
+    }
+
+    function test_reentrancy_blocked_on_grant_execution() public {
+        MaliciousJPYC malicious = new MaliciousJPYC();
+        address localDonor = makeAddr("localDonor");
+        FundConstitution localConstitution = new FundConstitution(
+            "Malicious", keccak256("m"), "ipfs://m", admin, IERC20(address(malicious))
+        );
+        TreasuryVault localTreasury = new TreasuryVault(localConstitution);
+        GrantController localController = new GrantController(
+            localConstitution,
+            localTreasury,
+            admin,
+            proposer,
+            approver1,
+            executor,
+            guardian,
+            config,
+            3 days,
+            MAX_GRANT,
+            1,
+            2 days,
+            14 days
+        );
+
+        malicious.configureAttack(localTreasury, true);
+        malicious.mint(localDonor, JPYC.yen(200_000));
+        vm.startPrank(localDonor);
+        malicious.approve(address(localTreasury), type(uint256).max);
+        localTreasury.fundGrantBudget(JPYC.yen(100_000), bytes32(0));
+        vm.stopPrank();
+
+        vm.prank(proposer);
+        uint256 id = localController.createGrantProposal(
+            recipient, JPYC.yen(10_000), bytes32(0), bytes32(0), ""
+        );
+        vm.prank(approver1);
+        localController.approveGrantProposal(id);
+        vm.warp(block.timestamp + 2 days);
+
+        vm.prank(executor);
+        vm.expectRevert();
+        localController.executeGrantProposal(id);
+    }
+
+    function testFuzz_donations_maintain_invariant(uint96 principalAmount, uint96 budgetAmount)
+        public
+    {
+        principalAmount = uint96(bound(principalAmount, 1, JPYC.yen(1_000_000)));
+        budgetAmount = uint96(bound(budgetAmount, 1, JPYC.yen(1_000_000)));
+
+        address fuzzDonor = makeAddr("fuzzDonor");
+        jpyc.mint(fuzzDonor, uint256(principalAmount) + uint256(budgetAmount));
+
+        vm.startPrank(fuzzDonor);
+        jpyc.approve(address(treasury), type(uint256).max);
+        treasury.donatePrincipal(principalAmount, bytes32(uint256(1)));
+        treasury.fundGrantBudget(budgetAmount, bytes32(uint256(2)));
+        vm.stopPrank();
+
+        assertGe(
+            treasury.totalTreasuryAssets(),
+            treasury.protectedPrincipal() + treasury.availableGrantBudget()
+        );
+    }
+}
