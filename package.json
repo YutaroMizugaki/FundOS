@@ -1,0 +1,33 @@
+{
+  "name": "fundos",
+  "version": "0.1.0",
+  "description": "FundOS — a programmable-money engine for building self-driving (autonomous) funds.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "fundos": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "demo": "tsx examples/endowment.ts",
+    "cli": "tsx src/cli.ts"
+  },
+  "keywords": [
+    "programmable-money",
+    "autonomous-fund",
+    "endowment",
+    "treasury",
+    "defi",
+    "fintech"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
