@@ -52,11 +52,7 @@ contract FundOSTest is Test {
     function setUp() public {
         jpyc = new MockJPYC();
         constitution = new FundConstitution(
-            "FundOS Test Fund",
-            keccak256("test-purpose"),
-            "ipfs://test",
-            admin,
-            IERC20(address(jpyc))
+            "FundOS Test Fund", keccak256("test-purpose"), "ipfs://test", admin, IERC20(address(jpyc))
         );
         treasury = new TreasuryVault(constitution);
         controller = new GrantController(
@@ -74,6 +70,7 @@ contract FundOSTest is Test {
             2 days,
             14 days
         );
+        treasury.authorizeGrantController(address(controller));
 
         bytes32 approverRole = keccak256("APPROVER_ROLE");
         vm.prank(admin);
@@ -134,9 +131,10 @@ contract FundOSTest is Test {
 
     function _createProposal(uint256 amount) internal returns (uint256 id) {
         vm.prank(proposer);
-        return controller.createGrantProposal(
-            recipient, amount, keccak256("purpose"), keccak256("evidence"), "ipfs://meta"
-        );
+        return
+            controller.createGrantProposal(
+                recipient, amount, keccak256("purpose"), keccak256("evidence"), "ipfs://meta"
+            );
     }
 
     function _approveTwice(uint256 id) internal {
@@ -251,9 +249,7 @@ contract FundOSTest is Test {
         assertEq(jpyc.balanceOf(recipient), grant);
         assertEq(treasury.availableGrantBudget(), budgetBefore - grant);
         assertEq(treasury.protectedPrincipal(), principalBefore);
-        assertEq(
-            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Executed)
-        );
+        assertEq(uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Executed));
     }
 
     function test_executed_proposal_cannot_reexecute() public {
@@ -405,12 +401,167 @@ contract FundOSTest is Test {
         treasury.executeGrantTransfer(admin, 1);
     }
 
+    function _createAndApproveYield(uint256 amount) internal returns (uint256 allocationId) {
+        jpyc.mint(address(treasury), amount);
+        vm.prank(config);
+        allocationId = controller.createYieldAllocation(amount, keccak256("yield-statement"), "ipfs://yield");
+        vm.prank(approver1);
+        controller.approveYieldAllocation(allocationId);
+        vm.prank(approver2);
+        controller.approveYieldAllocation(allocationId);
+    }
+
+    function test_yield_allocation_only_reclassifies_verified_surplus() public {
+        uint256 amount = JPYC.yen(25_000);
+        uint256 allocationId = _createAndApproveYield(amount);
+        vm.warp(block.timestamp + 2 days);
+
+        uint256 balanceBefore = treasury.totalTreasuryAssets();
+        uint256 principalBefore = treasury.protectedPrincipal();
+        uint256 budgetBefore = treasury.availableGrantBudget();
+
+        vm.prank(executor);
+        controller.executeYieldAllocation(allocationId);
+
+        assertEq(treasury.totalTreasuryAssets(), balanceBefore);
+        assertEq(treasury.protectedPrincipal(), principalBefore);
+        assertEq(treasury.availableGrantBudget(), budgetBefore + amount);
+        assertEq(treasury.accountingSurplus(), 0);
+    }
+
+    function test_yield_allocation_cannot_exceed_surplus() public {
+        vm.prank(config);
+        vm.expectRevert(GrantController.InsufficientAccountingSurplus.selector);
+        controller.createYieldAllocation(JPYC.yen(1), bytes32(0), "");
+    }
+
+    function test_only_config_can_create_yield_allocation() public {
+        jpyc.mint(address(treasury), JPYC.yen(1));
+        vm.prank(admin);
+        vm.expectRevert();
+        controller.createYieldAllocation(JPYC.yen(1), bytes32(0), "");
+    }
+
+    function test_admin_cannot_recognize_yield_directly() public {
+        jpyc.mint(address(treasury), JPYC.yen(1));
+        vm.prank(admin);
+        vm.expectRevert(TreasuryVault.OnlyGrantController.selector);
+        treasury.recognizeYield(JPYC.yen(1), bytes32(0));
+    }
+
+    function test_yield_allocation_requires_approvals_and_timelock() public {
+        uint256 amount = JPYC.yen(10_000);
+        jpyc.mint(address(treasury), amount);
+        vm.prank(config);
+        uint256 allocationId = controller.createYieldAllocation(amount, bytes32(0), "");
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.InvalidProposalStatus.selector);
+        controller.executeYieldAllocation(allocationId);
+
+        vm.prank(approver1);
+        controller.approveYieldAllocation(allocationId);
+        vm.prank(approver2);
+        controller.approveYieldAllocation(allocationId);
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.TimelockNotElapsed.selector);
+        controller.executeYieldAllocation(allocationId);
+    }
+
+    function _initiateAndApproveDissolution() internal {
+        vm.prank(guardian);
+        controller.pause();
+        vm.prank(config);
+        controller.initiateDissolution(keccak256("legal-resolution"), "ipfs://resolution");
+        vm.prank(approver1);
+        controller.approveDissolution();
+        vm.prank(approver2);
+        controller.approveDissolution();
+    }
+
+    function test_dissolution_requires_paused_fund() public {
+        vm.prank(config);
+        vm.expectRevert(GrantController.FundNotPaused.selector);
+        controller.initiateDissolution(keccak256("resolution"), "ipfs://resolution");
+    }
+
+    function test_dissolution_requires_long_timelock() public {
+        _initiateAndApproveDissolution();
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.TimelockNotElapsed.selector);
+        controller.executeDissolution();
+    }
+
+    function test_dissolution_pending_blocks_new_funds() public {
+        vm.prank(guardian);
+        controller.pause();
+        vm.prank(config);
+        controller.initiateDissolution(keccak256("resolution"), "ipfs://resolution");
+
+        vm.startPrank(donor);
+        vm.expectRevert(TreasuryVault.FundNotActive.selector);
+        treasury.fundGrantBudget(1, bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_dissolution_transfers_all_assets_to_fixed_recipient_and_is_terminal() public {
+        jpyc.mint(address(treasury), JPYC.yen(5_000));
+        uint256 treasuryBalance = treasury.totalTreasuryAssets();
+        _initiateAndApproveDissolution();
+        vm.warp(block.timestamp + 30 days);
+
+        vm.prank(executor);
+        controller.executeDissolution();
+
+        assertEq(jpyc.balanceOf(constitution.dissolutionRecipient()), treasuryBalance);
+        assertEq(treasury.totalTreasuryAssets(), 0);
+        assertEq(treasury.protectedPrincipal(), 0);
+        assertEq(treasury.availableGrantBudget(), 0);
+        assertEq(uint8(treasury.lifecycle()), uint8(TreasuryVault.FundLifecycle.Dissolved));
+
+        vm.expectRevert(TreasuryVault.FundNotActive.selector);
+        treasury.donatePrincipal(1, bytes32(0));
+
+        vm.prank(admin);
+        vm.expectRevert(GrantController.FundNotActive.selector);
+        controller.unpause();
+    }
+
+    function test_dissolution_cannot_be_executed_by_non_executor() public {
+        _initiateAndApproveDissolution();
+        vm.warp(block.timestamp + 30 days);
+
+        vm.prank(admin);
+        vm.expectRevert();
+        controller.executeDissolution();
+    }
+
+    function test_guardian_can_cancel_dissolution() public {
+        vm.prank(guardian);
+        controller.pause();
+        vm.prank(config);
+        controller.initiateDissolution(keccak256("resolution"), "ipfs://resolution");
+
+        vm.prank(guardian);
+        controller.cancelDissolution();
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.InvalidProposalStatus.selector);
+        controller.executeDissolution();
+
+        vm.prank(admin);
+        controller.unpause();
+        vm.prank(donor);
+        treasury.fundGrantBudget(1, bytes32(0));
+    }
+
     function test_reentrancy_blocked_on_grant_execution() public {
         MaliciousJPYC malicious = new MaliciousJPYC();
         address localDonor = makeAddr("localDonor");
-        FundConstitution localConstitution = new FundConstitution(
-            "Malicious", keccak256("m"), "ipfs://m", admin, IERC20(address(malicious))
-        );
+        FundConstitution localConstitution =
+            new FundConstitution("Malicious", keccak256("m"), "ipfs://m", admin, IERC20(address(malicious)));
         TreasuryVault localTreasury = new TreasuryVault(localConstitution);
         GrantController localController = new GrantController(
             localConstitution,
@@ -427,6 +578,7 @@ contract FundOSTest is Test {
             2 days,
             14 days
         );
+        localTreasury.authorizeGrantController(address(localController));
 
         malicious.configureAttack(localTreasury, true);
         malicious.mint(localDonor, JPYC.yen(200_000));
@@ -436,9 +588,7 @@ contract FundOSTest is Test {
         vm.stopPrank();
 
         vm.prank(proposer);
-        uint256 id = localController.createGrantProposal(
-            recipient, JPYC.yen(10_000), bytes32(0), bytes32(0), ""
-        );
+        uint256 id = localController.createGrantProposal(recipient, JPYC.yen(10_000), bytes32(0), bytes32(0), "");
         vm.prank(approver1);
         localController.approveGrantProposal(id);
         vm.warp(block.timestamp + 2 days);
@@ -448,9 +598,7 @@ contract FundOSTest is Test {
         localController.executeGrantProposal(id);
     }
 
-    function testFuzz_donations_maintain_invariant(uint96 principalAmount, uint96 budgetAmount)
-        public
-    {
+    function testFuzz_donations_maintain_invariant(uint96 principalAmount, uint96 budgetAmount) public {
         principalAmount = uint96(bound(principalAmount, 1, JPYC.yen(1_000_000)));
         budgetAmount = uint96(bound(budgetAmount, 1, JPYC.yen(1_000_000)));
 
@@ -463,9 +611,6 @@ contract FundOSTest is Test {
         treasury.fundGrantBudget(budgetAmount, bytes32(uint256(2)));
         vm.stopPrank();
 
-        assertGe(
-            treasury.totalTreasuryAssets(),
-            treasury.protectedPrincipal() + treasury.availableGrantBudget()
-        );
+        assertGe(treasury.totalTreasuryAssets(), treasury.protectedPrincipal() + treasury.availableGrantBudget());
     }
 }

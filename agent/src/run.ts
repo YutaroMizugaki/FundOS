@@ -1,5 +1,5 @@
 /**
- * FundOS Phase 1 monitoring agent — read-only fund health and grant pipeline reporting.
+ * FundOS monitoring agent — read-only accounting, grant, yield, and lifecycle reporting.
  *
  * Required env:
  *   RPC_URL
@@ -8,10 +8,10 @@
  *
  * Optional:
  *   JPYC_NETWORK (ethereum | polygon | avalanche, default: polygon)
- *   JPYC_TOKEN (override token address; defaults to canonical JPYC)
+ *   JPYC_TOKEN (optional assertion; must match TreasuryVault.jpyc())
  */
 import { createPublicClient, http, parseAbi, type Address } from "viem";
-import { resolveJPYCChain, JPYC_ADDRESS } from "./jpyc.js";
+import { resolveJPYCChain } from "./jpyc.js";
 
 const treasuryAbi = parseAbi([
   "function jpyc() view returns (address)",
@@ -19,11 +19,15 @@ const treasuryAbi = parseAbi([
   "function availableGrantBudget() view returns (uint256)",
   "function totalTreasuryAssets() view returns (uint256)",
   "function accountingSurplus() view returns (uint256)",
+  "function lifecycle() view returns (uint8)",
 ]);
 
 const grantControllerAbi = parseAbi([
   "function nextProposalId() view returns (uint256)",
   "function getProposal(uint256 proposalId) view returns ((address recipient, uint256 amount, bytes32 purposeId, bytes32 evidenceHash, string metadataURI, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 status))",
+  "function nextYieldAllocationId() view returns (uint256)",
+  "function getYieldAllocation(uint256 allocationId) view returns ((uint256 amount, bytes32 evidenceHash, string metadataURI, address proposer, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 approvalThreshold, uint8 status))",
+  "function getDissolution() view returns ((bytes32 resolutionHash, string metadataURI, address proposer, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 approvalThreshold, uint8 status))",
 ]);
 
 const erc20Abi = parseAbi(["function balanceOf(address account) view returns (uint256)"]);
@@ -36,6 +40,16 @@ const GRANT_STATUS = {
   Cancelled: 4,
   Expired: 5,
 } as const;
+
+const GOVERNANCE_STATUS = {
+  None: 0,
+  Pending: 1,
+  Approved: 2,
+  Executed: 3,
+  Cancelled: 4,
+} as const;
+
+const FUND_LIFECYCLE = ["Active", "DissolutionPending", "Dissolved"] as const;
 
 type GrantProposal = {
   proposalId: number;
@@ -60,6 +74,46 @@ function env(name: string): string {
 function statusName(status: number): keyof typeof GRANT_STATUS {
   const entry = Object.entries(GRANT_STATUS).find(([, value]) => value === status);
   return (entry?.[0] as keyof typeof GRANT_STATUS) ?? "None";
+}
+
+function governanceStatusName(status: number): keyof typeof GOVERNANCE_STATUS {
+  const entry = Object.entries(GOVERNANCE_STATUS).find(([, value]) => value === status);
+  return (entry?.[0] as keyof typeof GOVERNANCE_STATUS) ?? "None";
+}
+
+async function loadYieldAllocations(
+  client: ReturnType<typeof createPublicClient>,
+  controller: Address,
+) {
+  const nextId = await client.readContract({
+    address: controller,
+    abi: grantControllerAbi,
+    functionName: "nextYieldAllocationId",
+  });
+
+  const allocations = [];
+  for (let id = 1n; id < nextId; id++) {
+    const allocation = await client.readContract({
+      address: controller,
+      abi: grantControllerAbi,
+      functionName: "getYieldAllocation",
+      args: [id],
+    });
+    allocations.push({
+      allocationId: Number(id),
+      amount: allocation.amount.toString(),
+      evidenceHash: allocation.evidenceHash,
+      metadataURI: allocation.metadataURI,
+      proposer: allocation.proposer,
+      createdAt: Number(allocation.createdAt),
+      executableAt: Number(allocation.executableAt),
+      expiresAt: Number(allocation.expiresAt),
+      approvalCount: allocation.approvalCount,
+      approvalThreshold: allocation.approvalThreshold,
+      status: governanceStatusName(allocation.status),
+    });
+  }
+  return allocations;
 }
 
 async function loadProposals(
@@ -110,10 +164,27 @@ async function main() {
   const client = createPublicClient({ chain, transport: http(env("RPC_URL")) });
   const now = Math.floor(Date.now() / 1000);
 
-  const jpycAddress = (process.env.JPYC_TOKEN ?? JPYC_ADDRESS) as Address;
+  const jpycAddress = await client.readContract({
+    address: treasury,
+    abi: treasuryAbi,
+    functionName: "jpyc",
+  });
+  if (
+    process.env.JPYC_TOKEN &&
+    process.env.JPYC_TOKEN.toLowerCase() !== jpycAddress.toLowerCase()
+  ) {
+    throw new Error("JPYC_TOKEN does not match TreasuryVault.jpyc()");
+  }
 
-  const [jpycBalance, protectedPrincipal, availableGrantBudget, totalTreasuryAssets, accountingSurplus] =
-    await Promise.all([
+  const [
+    jpycBalance,
+    protectedPrincipal,
+    availableGrantBudget,
+    totalTreasuryAssets,
+    accountingSurplus,
+    lifecycle,
+    dissolution,
+  ] = await Promise.all([
       client.readContract({
         address: jpycAddress,
         abi: erc20Abi,
@@ -140,9 +211,20 @@ async function main() {
         abi: treasuryAbi,
         functionName: "accountingSurplus",
       }),
+      client.readContract({
+        address: treasury,
+        abi: treasuryAbi,
+        functionName: "lifecycle",
+      }),
+      client.readContract({
+        address: controller,
+        abi: grantControllerAbi,
+        functionName: "getDissolution",
+      }),
     ]);
 
   const proposals = await loadProposals(client, controller);
+  const yieldAllocations = await loadYieldAllocations(client, controller);
 
   const pending = proposals.filter((p) => p.status === "Pending");
   const approvedUnexecuted = proposals.filter((p) => p.status === "Approved");
@@ -162,6 +244,7 @@ async function main() {
     treasury,
     grantController: controller,
     jpyc: jpycAddress,
+    lifecycle: FUND_LIFECYCLE[lifecycle] ?? "Unknown",
     accounting: {
       jpycBalance: jpycBalance.toString(),
       protectedPrincipal: protectedPrincipal.toString(),
@@ -176,6 +259,18 @@ async function main() {
       approvedUnexecuted,
       executable,
       expired,
+    },
+    yieldAllocations,
+    dissolution: {
+      resolutionHash: dissolution.resolutionHash,
+      metadataURI: dissolution.metadataURI,
+      proposer: dissolution.proposer,
+      createdAt: Number(dissolution.createdAt),
+      executableAt: Number(dissolution.executableAt),
+      expiresAt: Number(dissolution.expiresAt),
+      approvalCount: dissolution.approvalCount,
+      approvalThreshold: dissolution.approvalThreshold,
+      status: governanceStatusName(dissolution.status),
     },
   };
 
