@@ -36,10 +36,11 @@ export function formatYen(amount: bigint): string {
   return `${whole.toLocaleString("ja-JP")} 円`;
 }
 
-/** Default policy for a JPYC-denominated autonomous fund. */
-export const DEFAULT_JPYC_POLICY = {
-  minCashReserveBps: 1000,
-  maxTransferBps: 2000,
-  dailySpendCapYen: 10_000_000n,
-  targetCashBps: 2000,
+/** Default policy for a JPYC-denominated purpose-restricted fund. */
+export const DEFAULT_FUND_POLICY = {
+  maxGrantAmountYen: 500_000n,
+  requiredApprovals: 2,
+  timelockDurationSeconds: 2 * 24 * 60 * 60,
+  proposalValidityPeriodSeconds: 14 * 24 * 60 * 60,
+  adminTransferDelaySeconds: 3 * 24 * 60 * 60,
 } as const;
