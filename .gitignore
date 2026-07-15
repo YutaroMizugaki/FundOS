@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+agent/dist/
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+
+# Env
+.env
+.env.*
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
