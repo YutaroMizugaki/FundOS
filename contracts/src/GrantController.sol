@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {
     AccessControlDefaultAdminRules
 } from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -201,6 +202,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     event DissolutionApproved(address indexed approver, uint8 approvalCount, uint64 executableAt);
     event DissolutionCancelled(address indexed cancelledBy);
     event FundDissolved(address indexed executor, address indexed recipient, uint256 amount);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     constructor(
         FundConstitution constitution_,
@@ -621,6 +623,18 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
 
         delete pendingConfiguration;
         emit ConfigurationCancelled(msg.sender);
+    }
+
+    /// @notice Rescues mistakenly sent ERC-20 tokens from the treasury. JPYC is never recoverable.
+    /// @dev The treasury only accepts this call from the controller, so this wrapper is the sole
+    ///      rescue path. Deliberately usable while paused: rescue must not depend on fund state.
+    function rescueToken(IERC20 token, address to, uint256 amount)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        nonReentrant
+    {
+        treasury.rescueToken(token, to, amount);
+        emit TokenRescued(address(token), to, amount);
     }
 
     function pause() external onlyRole(GUARDIAN_ROLE) {

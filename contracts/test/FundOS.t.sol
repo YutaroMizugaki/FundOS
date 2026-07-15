@@ -534,6 +534,44 @@ contract FundOSTest is Test {
         treasury.rescueToken(IERC20(address(jpyc)), admin, 1);
     }
 
+    function test_admin_rescues_stray_token_via_controller() public {
+        MockJPYC stray = new MockJPYC();
+        stray.mint(address(treasury), JPYC.yen(1_000));
+
+        vm.prank(admin);
+        controller.rescueToken(IERC20(address(stray)), admin, JPYC.yen(1_000));
+
+        assertEq(stray.balanceOf(admin), JPYC.yen(1_000));
+        assertEq(stray.balanceOf(address(treasury)), 0);
+    }
+
+    function test_rescue_works_while_paused() public {
+        MockJPYC stray = new MockJPYC();
+        stray.mint(address(treasury), 1);
+
+        vm.prank(guardian);
+        controller.pause();
+
+        vm.prank(admin);
+        controller.rescueToken(IERC20(address(stray)), admin, 1);
+        assertEq(stray.balanceOf(admin), 1);
+    }
+
+    function test_non_admin_cannot_rescue_via_controller() public {
+        MockJPYC stray = new MockJPYC();
+        stray.mint(address(treasury), 1);
+
+        vm.prank(config);
+        vm.expectRevert();
+        controller.rescueToken(IERC20(address(stray)), config, 1);
+    }
+
+    function test_jpyc_rescue_via_controller_reverts() public {
+        vm.prank(admin);
+        vm.expectRevert(TreasuryVault.JPYCRescueForbidden.selector);
+        controller.rescueToken(IERC20(address(jpyc)), admin, 1);
+    }
+
     function test_accounting_invariant_holds() public view {
         uint256 balance = treasury.totalTreasuryAssets();
         uint256 accounted = treasury.protectedPrincipal() + treasury.availableGrantBudget();
