@@ -36,6 +36,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     error AlreadyApproved();
     error InsufficientApprovals();
     error TimelockNotElapsed();
+    error TimelockBeyondExpiry();
     error ProposalExpired();
     error ProposalNotExpired();
     error InsufficientGrantBudget();
@@ -298,9 +299,11 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         emit YieldAllocationApproved(allocationId, msg.sender, allocation.approvalCount);
 
         if (allocation.approvalCount >= allocation.approvalThreshold) {
+            uint64 executableAt = uint64(block.timestamp) + timelockDuration;
+            if (executableAt > allocation.expiresAt) revert TimelockBeyondExpiry();
             reservedYieldSurplus += allocation.amount;
             allocation.status = GovernanceStatus.Approved;
-            allocation.executableAt = uint64(block.timestamp) + timelockDuration;
+            allocation.executableAt = executableAt;
         }
     }
 
@@ -408,8 +411,10 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         dissolution.approvalCount += 1;
 
         if (dissolution.approvalCount >= dissolution.approvalThreshold) {
+            uint64 executableAt = uint64(block.timestamp) + DISSOLUTION_DELAY;
+            if (executableAt > dissolution.expiresAt) revert TimelockBeyondExpiry();
             dissolution.status = GovernanceStatus.Approved;
-            dissolution.executableAt = uint64(block.timestamp) + DISSOLUTION_DELAY;
+            dissolution.executableAt = executableAt;
         }
         emit DissolutionApproved(msg.sender, dissolution.approvalCount, dissolution.executableAt);
     }
@@ -507,9 +512,13 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         emit GrantProposalApproved(proposalId, msg.sender, proposal.approvalCount);
 
         if (proposal.approvalCount >= proposal.approvalThreshold) {
+            // Reject a threshold-reaching approval whose timelock would end after
+            // expiry; otherwise the proposal would silently become unexecutable.
+            uint64 executableAt = uint64(block.timestamp) + timelockDuration;
+            if (executableAt > proposal.expiresAt) revert TimelockBeyondExpiry();
             reservedGrantBudget += proposal.amount;
             proposal.status = GrantStatus.Approved;
-            proposal.executableAt = uint64(block.timestamp) + timelockDuration;
+            proposal.executableAt = executableAt;
         }
     }
 
@@ -519,9 +528,10 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
             revert InvalidProposalStatus();
         }
 
-        bool isProposer = msg.sender == proposalProposer[proposalId];
-        bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        if (!isProposer && !isAdmin) revert UnauthorizedCancellation();
+        if (
+            msg.sender != proposalProposer[proposalId] && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)
+                && !hasRole(GUARDIAN_ROLE, msg.sender)
+        ) revert UnauthorizedCancellation();
 
         if (proposal.status == GrantStatus.Approved) {
             reservedGrantBudget -= proposal.amount;

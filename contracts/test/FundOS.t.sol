@@ -305,6 +305,65 @@ contract FundOSTest is Test {
         assertEq(controller.spendableGrantBudget(), BUDGET);
     }
 
+    function test_guardian_can_cancel_grant_proposal() public {
+        uint256 grant = JPYC.yen(80_000);
+        uint256 id = _createProposal(grant);
+        _approveTwice(id);
+        assertEq(controller.reservedGrantBudget(), grant);
+
+        vm.prank(guardian);
+        controller.cancelGrantProposal(id);
+
+        assertEq(controller.reservedGrantBudget(), 0);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Cancelled)
+        );
+    }
+
+    function test_final_grant_approval_beyond_expiry_reverts() public {
+        // Validity 14 days, timelock 2 days: a threshold-reaching approval on day 13
+        // would set executableAt past expiry, so it must revert instead of creating
+        // a proposal that can never be executed.
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        vm.prank(approver1);
+        controller.approveGrantProposal(id);
+
+        vm.warp(block.timestamp + 13 days);
+        vm.prank(approver2);
+        vm.expectRevert(GrantController.TimelockBeyondExpiry.selector);
+        controller.approveGrantProposal(id);
+    }
+
+    function test_final_yield_approval_beyond_expiry_reverts() public {
+        uint256 amount = JPYC.yen(10_000);
+        jpyc.mint(address(treasury), amount);
+        vm.prank(config);
+        uint256 allocationId = controller.createYieldAllocation(amount, bytes32(0), "");
+        vm.prank(approver1);
+        controller.approveYieldAllocation(allocationId);
+
+        vm.warp(block.timestamp + 13 days);
+        vm.prank(approver2);
+        vm.expectRevert(GrantController.TimelockBeyondExpiry.selector);
+        controller.approveYieldAllocation(allocationId);
+    }
+
+    function test_final_dissolution_approval_beyond_expiry_reverts() public {
+        // Validity 90 days, delay 30 days: a threshold-reaching approval on day 61
+        // would set executableAt past expiry.
+        vm.prank(guardian);
+        controller.pause();
+        vm.prank(config);
+        controller.initiateDissolution(keccak256("resolution"), "ipfs://resolution");
+        vm.prank(approver1);
+        controller.approveDissolution();
+
+        vm.warp(block.timestamp + 61 days);
+        vm.prank(approver2);
+        vm.expectRevert(GrantController.TimelockBeyondExpiry.selector);
+        controller.approveDissolution();
+    }
+
     function test_grant_reservation_released_on_expire() public {
         uint256 grant = JPYC.yen(80_000);
         uint256 id = _createProposal(grant);
