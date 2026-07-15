@@ -559,6 +559,7 @@ contract FundOSTest is Test {
 
         vm.prank(admin);
         controller.unpause();
+        jpyc.mint(donor, 1);
         vm.prank(donor);
         treasury.fundGrantBudget(1, bytes32(0));
     }
