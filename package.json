@@ -1,0 +1,20 @@
+{
+  "name": "fundos",
+  "private": true,
+  "version": "0.1.0",
+  "description": "FundOS — programmable-money autonomous fund OS (高専拠出 MVP)",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @fundos/core && npm run build -w @fundos/kosen && npm run build -w @fundos/agent && npm run build -w @fundos/web",
+    "test": "npm run build -w @fundos/core && npm run build -w @fundos/kosen && npm run build -w @fundos/agent && npm run test -w @fundos/core && npm run test -w @fundos/kosen && npm run test -w @fundos/agent",
+    "demo": "npm run build -w @fundos/core && npm run build -w @fundos/kosen && npm run demo -w @fundos/agent",
+    "dev": "npm run build -w @fundos/core && npm run build -w @fundos/kosen && npm run build -w @fundos/agent && npm run dev -w @fundos/web",
+    "typecheck": "npm run typecheck -w @fundos/core && npm run typecheck -w @fundos/kosen && npm run typecheck -w @fundos/agent"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
