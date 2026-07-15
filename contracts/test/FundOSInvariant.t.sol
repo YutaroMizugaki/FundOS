@@ -19,7 +19,8 @@ contract FundOSHandler is Test {
     address public donor = makeAddr("handlerDonor");
     address public recipient = makeAddr("handlerRecipient");
     address public proposer = makeAddr("handlerProposer");
-    address public approver = makeAddr("handlerApprover");
+    address public approver1 = makeAddr("handlerApprover1");
+    address public approver2 = makeAddr("handlerApprover2");
     address public executor = makeAddr("handlerExecutor");
 
     uint256 public ghostExecutedGrants;
@@ -39,13 +40,13 @@ contract FundOSHandler is Test {
             treasury,
             makeAddr("admin"),
             proposer,
-            approver,
+            approver1,
             executor,
             makeAddr("guardian"),
             makeAddr("config"),
             3 days,
             JPYC.yen(100_000),
-            1,
+            2,
             1 days,
             7 days
         );
@@ -73,18 +74,23 @@ contract FundOSHandler is Test {
 
     function executeGrant(uint96 amount) external {
         amount = uint96(bound(amount, 1, JPYC.yen(50_000)));
-        if (treasury.availableGrantBudget() < amount) return;
+        if (controller.spendableGrantBudget() < amount) return;
 
         vm.startPrank(proposer);
         uint256 id = controller.createGrantProposal(recipient, amount, bytes32(0), bytes32(0), "");
         vm.stopPrank();
 
-        vm.prank(approver);
+        vm.prank(approver1);
+        controller.approveGrantProposal(id);
+        vm.prank(approver2);
         controller.approveGrantProposal(id);
 
         vm.warp(block.timestamp + 1 days);
 
-        if (block.timestamp > controller.getProposal(id).expiresAt) return;
+        if (block.timestamp > controller.getProposal(id).expiresAt) {
+            controller.expireGrantProposal(id);
+            return;
+        }
 
         vm.prank(executor);
         controller.executeGrantProposal(id);
@@ -97,6 +103,11 @@ contract FundOSInvariantTest is StdInvariant, Test {
 
     function setUp() public {
         handler = new FundOSHandler();
+        GrantController controller = handler.controller();
+        bytes32 approverRole = controller.APPROVER_ROLE();
+        address approver2 = handler.approver2();
+        vm.prank(makeAddr("admin"));
+        controller.grantRole(approverRole, approver2);
         targetContract(address(handler));
     }
 
@@ -105,6 +116,17 @@ contract FundOSInvariantTest is StdInvariant, Test {
         assertGe(
             treasury.totalTreasuryAssets(),
             treasury.protectedPrincipal() + treasury.availableGrantBudget()
+        );
+    }
+
+    function invariant_reservations_bounded() public view {
+        GrantController controller = handler.controller();
+        TreasuryVault treasury = handler.treasury();
+        assertLe(controller.reservedGrantBudget(), treasury.availableGrantBudget());
+        assertLe(controller.reservedYieldSurplus(), treasury.accountingSurplus());
+        assertEq(
+            controller.spendableGrantBudget(),
+            treasury.availableGrantBudget() - controller.reservedGrantBudget()
         );
     }
 

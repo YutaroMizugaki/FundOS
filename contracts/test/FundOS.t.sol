@@ -280,20 +280,57 @@ contract FundOSTest is Test {
     }
 
     function test_insufficient_budget_on_execute_reverts() public {
+        // With reservation, a second overlapping approval is blocked before execution.
         uint256 id = _createProposal(BUDGET);
         _approveTwice(id);
-        vm.warp(block.timestamp + 2 days);
+        assertEq(controller.reservedGrantBudget(), BUDGET);
+        assertEq(controller.spendableGrantBudget(), 0);
 
         uint256 id2 = _createProposal(JPYC.yen(1));
-        _approveTwice(id2);
+        vm.prank(approver1);
+        vm.expectRevert(GrantController.InsufficientGrantBudget.selector);
+        controller.approveGrantProposal(id2);
+    }
+
+    function test_grant_reservation_released_on_cancel() public {
+        uint256 grant = JPYC.yen(80_000);
+        uint256 id = _createProposal(grant);
+        _approveTwice(id);
+        assertEq(controller.reservedGrantBudget(), grant);
+
+        vm.prank(proposer);
+        controller.cancelGrantProposal(id);
+
+        assertEq(controller.reservedGrantBudget(), 0);
+        assertEq(controller.spendableGrantBudget(), BUDGET);
+    }
+
+    function test_grant_reservation_released_on_expire() public {
+        uint256 grant = JPYC.yen(80_000);
+        uint256 id = _createProposal(grant);
+        _approveTwice(id);
+        vm.warp(block.timestamp + 15 days);
+
+        controller.expireGrantProposal(id);
+
+        assertEq(controller.reservedGrantBudget(), 0);
+        assertEq(controller.spendableGrantBudget(), BUDGET);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Expired)
+        );
+    }
+
+    function test_execute_clears_reservation() public {
+        uint256 grant = JPYC.yen(80_000);
+        uint256 id = _createProposal(grant);
+        _approveTwice(id);
         vm.warp(block.timestamp + 2 days);
 
         vm.prank(executor);
         controller.executeGrantProposal(id);
 
-        vm.prank(executor);
-        vm.expectRevert(GrantController.InsufficientGrantBudget.selector);
-        controller.executeGrantProposal(id2);
+        assertEq(controller.reservedGrantBudget(), 0);
+        assertEq(controller.spendableGrantBudget(), BUDGET - grant);
     }
 
     function test_insufficient_budget_on_approval_reverts() public {
@@ -345,13 +382,73 @@ contract FundOSTest is Test {
         assertFalse(controller.paused());
     }
 
-    function test_pause_blocks_config_update() public {
+    function test_pause_blocks_config_propose() public {
         vm.prank(guardian);
         controller.pause();
 
         vm.prank(config);
         vm.expectRevert();
-        controller.updateConfiguration(MAX_GRANT, 2, 2 days, 14 days);
+        controller.proposeConfiguration(MAX_GRANT, 2, 2 days, 14 days);
+    }
+
+    function test_configuration_requires_timelock() public {
+        vm.prank(config);
+        controller.proposeConfiguration(MAX_GRANT / 2, 2, 2 days, 14 days);
+
+        vm.prank(config);
+        vm.expectRevert(GrantController.ConfigurationTimelockNotElapsed.selector);
+        controller.executeConfiguration();
+
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(config);
+        controller.executeConfiguration();
+
+        assertEq(controller.maxGrantAmount(), MAX_GRANT / 2);
+        assertFalse(controller.getPendingConfiguration().pending);
+    }
+
+    function test_configuration_cannot_set_approvals_below_minimum() public {
+        vm.prank(config);
+        vm.expectRevert(GrantController.InvalidConfiguration.selector);
+        controller.proposeConfiguration(MAX_GRANT, 1, 2 days, 14 days);
+    }
+
+    function test_configuration_cancel_clears_pending() public {
+        vm.prank(config);
+        controller.proposeConfiguration(MAX_GRANT / 2, 2, 2 days, 14 days);
+
+        vm.prank(guardian);
+        controller.cancelPendingConfiguration();
+
+        assertFalse(controller.getPendingConfiguration().pending);
+
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(config);
+        vm.expectRevert(GrantController.NoPendingConfiguration.selector);
+        controller.executeConfiguration();
+    }
+
+    function test_config_weakening_waits_current_timelock() public {
+        // Raise timelock to 7 days, then a later proposal to weaken it must wait 7 days.
+        vm.prank(config);
+        controller.proposeConfiguration(MAX_GRANT, 2, 7 days, 14 days);
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(config);
+        controller.executeConfiguration();
+        assertEq(controller.timelockDuration(), 7 days);
+
+        vm.prank(config);
+        controller.proposeConfiguration(MAX_GRANT, 2, 1 days, 14 days);
+
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(config);
+        vm.expectRevert(GrantController.ConfigurationTimelockNotElapsed.selector);
+        controller.executeConfiguration();
+
+        vm.warp(block.timestamp + 5 days);
+        vm.prank(config);
+        controller.executeConfiguration();
+        assertEq(controller.timelockDuration(), 1 days);
     }
 
     function test_pause_blocks_grant_execution() public {
@@ -470,9 +567,37 @@ contract FundOSTest is Test {
         vm.prank(approver2);
         controller.approveYieldAllocation(allocationId);
 
+        assertEq(controller.reservedYieldSurplus(), amount);
+        assertEq(controller.spendableSurplus(), 0);
+
         vm.prank(executor);
         vm.expectRevert(GrantController.TimelockNotElapsed.selector);
         controller.executeYieldAllocation(allocationId);
+    }
+
+    function test_yield_reservation_blocks_overlapping_approval() public {
+        uint256 amount = JPYC.yen(10_000);
+        jpyc.mint(address(treasury), amount);
+
+        // Both can be created while Pending; reservation happens only on Approved.
+        vm.prank(config);
+        uint256 first =
+            controller.createYieldAllocation(amount, keccak256("yield-a"), "ipfs://yield-a");
+        vm.prank(config);
+        uint256 second =
+            controller.createYieldAllocation(amount, keccak256("yield-b"), "ipfs://yield-b");
+
+        vm.prank(approver1);
+        controller.approveYieldAllocation(first);
+        vm.prank(approver2);
+        controller.approveYieldAllocation(first);
+
+        assertEq(controller.reservedYieldSurplus(), amount);
+        assertEq(controller.spendableSurplus(), 0);
+
+        vm.prank(approver1);
+        vm.expectRevert(GrantController.InsufficientAccountingSurplus.selector);
+        controller.approveYieldAllocation(second);
     }
 
     function _initiateAndApproveDissolution() internal {
@@ -582,11 +707,15 @@ contract FundOSTest is Test {
             config,
             3 days,
             MAX_GRANT,
-            1,
+            2,
             2 days,
             14 days
         );
         localTreasury.authorizeGrantController(address(localController));
+
+        bytes32 approverRole = keccak256("APPROVER_ROLE");
+        vm.prank(admin);
+        localController.grantRole(approverRole, approver2);
 
         malicious.configureAttack(localTreasury, true);
         malicious.mint(localDonor, JPYC.yen(200_000));
@@ -600,6 +729,8 @@ contract FundOSTest is Test {
             recipient, JPYC.yen(10_000), bytes32(0), bytes32(0), ""
         );
         vm.prank(approver1);
+        localController.approveGrantProposal(id);
+        vm.prank(approver2);
         localController.approveGrantProposal(id);
         vm.warp(block.timestamp + 2 days);
 

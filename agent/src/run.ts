@@ -28,6 +28,11 @@ const grantControllerAbi = parseAbi([
   "function nextYieldAllocationId() view returns (uint256)",
   "function getYieldAllocation(uint256 allocationId) view returns ((uint256 amount, bytes32 evidenceHash, string metadataURI, address proposer, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 approvalThreshold, uint8 status))",
   "function getDissolution() view returns ((bytes32 resolutionHash, string metadataURI, address proposer, uint64 createdAt, uint64 executableAt, uint64 expiresAt, uint8 approvalCount, uint8 approvalThreshold, uint8 status))",
+  "function reservedGrantBudget() view returns (uint256)",
+  "function reservedYieldSurplus() view returns (uint256)",
+  "function spendableGrantBudget() view returns (uint256)",
+  "function spendableSurplus() view returns (uint256)",
+  "function getPendingConfiguration() view returns ((uint256 maxGrantAmount, uint8 requiredApprovals, uint64 timelockDuration, uint64 proposalValidityPeriod, uint64 executableAt, bool pending))",
 ]);
 
 const erc20Abi = parseAbi(["function balanceOf(address account) view returns (uint256)"]);
@@ -47,6 +52,7 @@ const GOVERNANCE_STATUS = {
   Approved: 2,
   Executed: 3,
   Cancelled: 4,
+  Expired: 5,
 } as const;
 
 const FUND_LIFECYCLE = ["Active", "DissolutionPending", "Dissolved"] as const;
@@ -184,6 +190,11 @@ async function main() {
     accountingSurplus,
     lifecycle,
     dissolution,
+    reservedGrantBudget,
+    reservedYieldSurplus,
+    spendableGrantBudget,
+    spendableSurplus,
+    pendingConfiguration,
   ] = await Promise.all([
       client.readContract({
         address: jpycAddress,
@@ -221,6 +232,31 @@ async function main() {
         abi: grantControllerAbi,
         functionName: "getDissolution",
       }),
+      client.readContract({
+        address: controller,
+        abi: grantControllerAbi,
+        functionName: "reservedGrantBudget",
+      }),
+      client.readContract({
+        address: controller,
+        abi: grantControllerAbi,
+        functionName: "reservedYieldSurplus",
+      }),
+      client.readContract({
+        address: controller,
+        abi: grantControllerAbi,
+        functionName: "spendableGrantBudget",
+      }),
+      client.readContract({
+        address: controller,
+        abi: grantControllerAbi,
+        functionName: "spendableSurplus",
+      }),
+      client.readContract({
+        address: controller,
+        abi: grantControllerAbi,
+        functionName: "getPendingConfiguration",
+      }),
     ]);
 
   const proposals = await loadProposals(client, controller);
@@ -238,6 +274,8 @@ async function main() {
 
   const accounted = protectedPrincipal + availableGrantBudget;
   const invariantHolds = jpycBalance >= accounted;
+  const reservationHolds =
+    reservedGrantBudget <= availableGrantBudget && reservedYieldSurplus <= accountingSurplus;
 
   const report = {
     timestamp: new Date().toISOString(),
@@ -249,10 +287,17 @@ async function main() {
       jpycBalance: jpycBalance.toString(),
       protectedPrincipal: protectedPrincipal.toString(),
       availableGrantBudget: availableGrantBudget.toString(),
+      reservedGrantBudget: reservedGrantBudget.toString(),
+      spendableGrantBudget: spendableGrantBudget.toString(),
       totalTreasuryAssets: totalTreasuryAssets.toString(),
       accountingSurplus: accountingSurplus.toString(),
+      reservedYieldSurplus: reservedYieldSurplus.toString(),
+      spendableSurplus: spendableSurplus.toString(),
       invariantHolds,
+      reservationHolds,
       invariant: "jpycBalance >= protectedPrincipal + availableGrantBudget",
+      reservationInvariant:
+        "reservedGrantBudget <= availableGrantBudget && reservedYieldSurplus <= accountingSurplus",
     },
     grants: {
       pending,
@@ -261,6 +306,14 @@ async function main() {
       expired,
     },
     yieldAllocations,
+    pendingConfiguration: {
+      maxGrantAmount: pendingConfiguration.maxGrantAmount.toString(),
+      requiredApprovals: pendingConfiguration.requiredApprovals,
+      timelockDuration: Number(pendingConfiguration.timelockDuration),
+      proposalValidityPeriod: Number(pendingConfiguration.proposalValidityPeriod),
+      executableAt: Number(pendingConfiguration.executableAt),
+      pending: pendingConfiguration.pending,
+    },
     dissolution: {
       resolutionHash: dissolution.resolutionHash,
       metadataURI: dissolution.metadataURI,
@@ -276,7 +329,7 @@ async function main() {
 
   console.log(JSON.stringify(report, null, 2));
 
-  if (!invariantHolds) {
+  if (!invariantHolds || !reservationHolds) {
     process.exitCode = 1;
   }
 }
