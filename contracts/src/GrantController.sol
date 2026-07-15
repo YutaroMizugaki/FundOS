@@ -76,6 +76,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         uint64 executableAt;
         uint64 expiresAt;
         uint8 approvalCount;
+        uint8 approvalThreshold;
         GrantStatus status;
     }
 
@@ -469,6 +470,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
             executableAt: 0,
             expiresAt: expiresAt,
             approvalCount: 0,
+            approvalThreshold: requiredApprovals,
             status: GrantStatus.Pending
         });
         proposalProposer[proposalId] = msg.sender;
@@ -502,7 +504,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
 
         emit GrantProposalApproved(proposalId, msg.sender, proposal.approvalCount);
 
-        if (proposal.approvalCount >= requiredApprovals) {
+        if (proposal.approvalCount >= proposal.approvalThreshold) {
             reservedGrantBudget += proposal.amount;
             proposal.status = GrantStatus.Approved;
             proposal.executableAt = uint64(block.timestamp) + timelockDuration;

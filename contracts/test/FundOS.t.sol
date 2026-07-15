@@ -428,6 +428,53 @@ contract FundOSTest is Test {
         controller.executeConfiguration();
     }
 
+    function _applyConfiguration(uint8 approvals) internal {
+        vm.prank(config);
+        controller.proposeConfiguration(MAX_GRANT, approvals, 2 days, 14 days);
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(config);
+        controller.executeConfiguration();
+    }
+
+    function test_lowering_required_approvals_does_not_affect_existing_proposal() public {
+        _applyConfiguration(3);
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        assertEq(controller.getProposal(id).approvalThreshold, 3);
+
+        _applyConfiguration(2);
+
+        // Two approvals must not satisfy the snapshotted threshold of 3.
+        _approveTwice(id);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Pending)
+        );
+
+        vm.prank(executor);
+        vm.expectRevert(GrantController.InvalidProposalStatus.selector);
+        controller.executeGrantProposal(id);
+
+        address approver3 = makeAddr("approver3");
+        vm.prank(admin);
+        controller.grantRole(keccak256("APPROVER_ROLE"), approver3);
+        vm.prank(approver3);
+        controller.approveGrantProposal(id);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Approved)
+        );
+    }
+
+    function test_raising_required_approvals_does_not_affect_existing_proposal() public {
+        uint256 id = _createProposal(JPYC.yen(50_000));
+        assertEq(controller.getProposal(id).approvalThreshold, 2);
+
+        _applyConfiguration(3);
+
+        _approveTwice(id);
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Approved)
+        );
+    }
+
     function test_config_weakening_waits_current_timelock() public {
         // Raise timelock to 7 days, then a later proposal to weaken it must wait 7 days.
         vm.prank(config);
