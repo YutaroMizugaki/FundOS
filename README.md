@@ -52,21 +52,25 @@ fundGrantBudget(uint256 amount, bytes32 sourceRef)
 - 誰でも実行可能
 - **助成実行時のみ**消費される
 - 返金不可
+- Approved になった助成 Proposal は `reservedGrantBudget` として予約され、重複承認を防ぐ
+- 実際に新規承認へ回せる額は `spendableGrantBudget = availableGrantBudget - reservedGrantBudget`
 
 ### 会計不変条件
 
 ```text
 JPYC 実残高 >= protectedPrincipal + availableGrantBudget
+reservedGrantBudget <= availableGrantBudget
+reservedYieldSurplus <= accountingSurplus
 ```
 
-超過分は `accountingSurplus`（誤送金等）。Surplus を管理者が引き出す機能はありません。
+超過分は `accountingSurplus`（誤送金等）。Surplus を管理者が引き出す機能はありません。運用益認定の Approved 案件は `reservedYieldSurplus` で予約されます。
 
 ## 運用益の予算振替（限定 Phase 2）
 
 外部運用そのものはまだ実装していません。外部口座・将来の Strategy から JPYC が Treasury に戻ると、まず `accountingSurplus` になります。運用益であることをオフチェーン証憑で確認後、次の手順でのみ予算化できます。
 
 1. Config が `createYieldAllocation(amount, evidenceHash, metadataURI)` を作成
-2. Approver が複数承認（作成者の自己承認・二重承認不可）
+2. Approver が複数承認（作成者の自己承認・二重承認不可）。必要数到達時に surplus を予約
 3. 通常の Timelock 経過後、Executor が `executeYieldAllocation`
 4. Treasury が同額を surplus から `availableGrantBudget` へ**会計上のみ振替**
 
@@ -91,19 +95,33 @@ Executor、Admin、Config のいずれも単独では受取先を変更できま
 ```mermaid
 stateDiagram-v2
     [*] --> Pending: createGrantProposal
-    Pending --> Approved: 必要承認数到達
+    Pending --> Approved: 必要承認数到達（予算予約）
     Pending --> Cancelled: cancel
-    Approved --> Executed: execute（Timelock 後）
-    Approved --> Cancelled: cancel
-    Pending --> Expired: 期限切れ
-    Approved --> Expired: 期限切れ
+    Pending --> Expired: expire（期限後）
+    Approved --> Executed: execute（Timelock 後・予約解放）
+    Approved --> Cancelled: cancel（予約解放）
+    Approved --> Expired: expire（期限後・予約解放）
 ```
 
 1. **Proposer** が Proposal 作成（recipient / amount / purposeId / evidenceHash / metadataURI）
-2. **Approver** が承認（自己承認・二重承認不可）
-3. 必要承認数に達すると **Approved**、`executableAt = now + timelock`
+2. **Approver** が承認（自己承認・二重承認不可）。`spendableGrantBudget` が不足している場合は承認不可
+3. 必要承認数に達すると **Approved**、予算を予約し `executableAt = now + timelock`
 4. **Executor** が Timelock 経過後・期限内に `executeGrantProposal`
-5. Treasury から recipient へ JPYC 送金、`availableGrantBudget` を減算
+5. Treasury から recipient へ JPYC 送金、`availableGrantBudget` と予約を減算
+6. 期限切れ後は誰でも `expireGrantProposal` でき、予約を解放する
+
+### 設定変更（Timelock 付き）
+
+CONFIG はパラメータを即時変更できません。
+
+1. Config が `proposeConfiguration(...)` を作成
+2. **現在の** `timelockDuration` 経過後に `executeConfiguration`
+3. Config / Admin / Guardian は実行前に `cancelPendingConfiguration` 可能
+
+制約:
+
+- `requiredApprovals` の下限は **2**
+- Timelock 短縮も「短縮前の長い待機」を経るため、即時弱体化できない
 
 ## 権限モデル（AccessControl）
 
@@ -114,7 +132,7 @@ stateDiagram-v2
 | `APPROVER_ROLE` | Proposal 承認 |
 | `EXECUTOR_ROLE` | 承認済み Proposal の実行 |
 | `GUARDIAN_ROLE` | **緊急停止のみ**（解除不可） |
-| `CONFIG_ROLE` | 上限・承認数・Timelock・有効期間の変更、停止解除 |
+| `CONFIG_ROLE` | 上限・承認数・Timelock・有効期間の**提案**、停止解除、運用益認定・解散の開始 |
 
 `AccessControlDefaultAdminRules` により Default Admin の移管に遅延を設定します。本番では **Safe や TimelockController** を Admin / Config に指定してください。
 

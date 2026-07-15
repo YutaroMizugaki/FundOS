@@ -21,6 +21,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
 
     uint64 public constant MIN_TIMELOCK_DURATION = 1 days;
     uint64 public constant MIN_PROPOSAL_VALIDITY = 2 days;
+    uint8 public constant MIN_REQUIRED_APPROVALS = 2;
     uint64 public constant DISSOLUTION_DELAY = 30 days;
     uint64 public constant DISSOLUTION_VALIDITY = 90 days;
 
@@ -35,6 +36,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     error InsufficientApprovals();
     error TimelockNotElapsed();
     error ProposalExpired();
+    error ProposalNotExpired();
     error InsufficientGrantBudget();
     error ExceedsMaxGrantAmount();
     error GuardianCannotUnpause();
@@ -43,6 +45,8 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     error FundNotPaused();
     error FundNotActive();
     error DissolutionPending();
+    error NoPendingConfiguration();
+    error ConfigurationTimelockNotElapsed();
 
     enum GrantStatus {
         None,
@@ -58,7 +62,8 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         Pending,
         Approved,
         Executed,
-        Cancelled
+        Cancelled,
+        Expired
     }
 
     struct GrantProposal {
@@ -99,6 +104,15 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         GovernanceStatus status;
     }
 
+    struct PendingConfiguration {
+        uint256 maxGrantAmount;
+        uint8 requiredApprovals;
+        uint64 timelockDuration;
+        uint64 proposalValidityPeriod;
+        uint64 executableAt;
+        bool pending;
+    }
+
     FundConstitution public immutable constitution;
     TreasuryVault public immutable treasury;
 
@@ -106,6 +120,11 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     uint8 public requiredApprovals;
     uint64 public timelockDuration;
     uint64 public proposalValidityPeriod;
+
+    /// @notice Grant budget locked by Approved proposals awaiting execution or expiry.
+    uint256 public reservedGrantBudget;
+    /// @notice Accounting surplus locked by Approved yield allocations.
+    uint256 public reservedYieldSurplus;
 
     uint256 public nextProposalId = 1;
     mapping(uint256 => GrantProposal) public proposals;
@@ -117,6 +136,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     DissolutionProposal public dissolution;
     uint256 public dissolutionNonce;
     mapping(uint256 => mapping(address => bool)) public dissolutionApprovals;
+    PendingConfiguration public pendingConfiguration;
 
     event GrantProposalCreated(
         uint256 indexed proposalId,
@@ -132,11 +152,19 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         uint256 indexed proposalId, address indexed approver, uint8 approvalCount
     );
     event GrantProposalCancelled(uint256 indexed proposalId, address indexed cancelledBy);
+    event GrantProposalExpired(uint256 indexed proposalId);
     event GrantProposalExecuted(
         uint256 indexed proposalId,
         address indexed executor,
         address indexed recipient,
         uint256 amount
+    );
+    event ConfigurationProposed(
+        uint256 maxGrantAmount,
+        uint8 requiredApprovals,
+        uint64 timelockDuration,
+        uint64 proposalValidityPeriod,
+        uint64 executableAt
     );
     event ConfigurationUpdated(
         uint256 maxGrantAmount,
@@ -144,6 +172,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         uint64 timelockDuration,
         uint64 proposalValidityPeriod
     );
+    event ConfigurationCancelled(address indexed cancelledBy);
     event FundPaused(address account);
     event FundUnpaused(address account);
     event YieldAllocationCreated(
@@ -158,6 +187,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         uint256 indexed allocationId, address indexed approver, uint8 approvalCount
     );
     event YieldAllocationCancelled(uint256 indexed allocationId, address indexed cancelledBy);
+    event YieldAllocationExpired(uint256 indexed allocationId);
     event YieldAllocated(
         uint256 indexed allocationId, address indexed executor, uint256 amount, bytes32 evidenceHash
     );
@@ -222,7 +252,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     ) external onlyRole(CONFIG_ROLE) whenNotPaused returns (uint256 allocationId) {
         _requireFundActive();
         if (amount == 0) revert ZeroAmount();
-        if (amount > treasury.accountingSurplus()) revert InsufficientAccountingSurplus();
+        if (amount > spendableSurplus()) revert InsufficientAccountingSurplus();
 
         allocationId = nextYieldAllocationId++;
         uint64 createdAt = uint64(block.timestamp);
@@ -256,7 +286,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         if (block.timestamp > allocation.expiresAt) revert ProposalExpired();
         if (msg.sender == allocation.proposer) revert SelfApprovalForbidden();
         if (yieldAllocationApprovals[allocationId][msg.sender]) revert AlreadyApproved();
-        if (allocation.amount > treasury.accountingSurplus()) {
+        if (allocation.amount > spendableSurplus()) {
             revert InsufficientAccountingSurplus();
         }
 
@@ -265,6 +295,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         emit YieldAllocationApproved(allocationId, msg.sender, allocation.approvalCount);
 
         if (allocation.approvalCount >= allocation.approvalThreshold) {
+            reservedYieldSurplus += allocation.amount;
             allocation.status = GovernanceStatus.Approved;
             allocation.executableAt = uint64(block.timestamp) + timelockDuration;
         }
@@ -284,8 +315,30 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
                 && !hasRole(GUARDIAN_ROLE, msg.sender)
         ) revert UnauthorizedCancellation();
 
+        if (allocation.status == GovernanceStatus.Approved) {
+            reservedYieldSurplus -= allocation.amount;
+        }
         allocation.status = GovernanceStatus.Cancelled;
         emit YieldAllocationCancelled(allocationId, msg.sender);
+    }
+
+    /// @notice Releases reserved surplus for an expired yield allocation. Callable by anyone.
+    function expireYieldAllocation(uint256 allocationId) external {
+        YieldAllocation storage allocation = yieldAllocations[allocationId];
+        if (allocation.status == GovernanceStatus.None) revert ProposalNotFound();
+        if (
+            allocation.status != GovernanceStatus.Pending
+                && allocation.status != GovernanceStatus.Approved
+        ) {
+            revert InvalidProposalStatus();
+        }
+        if (block.timestamp <= allocation.expiresAt) revert ProposalNotExpired();
+
+        if (allocation.status == GovernanceStatus.Approved) {
+            reservedYieldSurplus -= allocation.amount;
+        }
+        allocation.status = GovernanceStatus.Expired;
+        emit YieldAllocationExpired(allocationId);
     }
 
     function executeYieldAllocation(uint256 allocationId)
@@ -303,6 +356,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         }
 
         allocation.status = GovernanceStatus.Executed;
+        reservedYieldSurplus -= allocation.amount;
         treasury.recognizeYield(allocation.amount, allocation.evidenceHash);
         emit YieldAllocated(allocationId, msg.sender, allocation.amount, allocation.evidenceHash);
     }
@@ -383,6 +437,8 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         address recipient = constitution.dissolutionRecipient();
         uint256 amount = treasury.totalTreasuryAssets();
         dissolution.status = GovernanceStatus.Executed;
+        reservedGrantBudget = 0;
+        reservedYieldSurplus = 0;
         treasury.executeDissolution(recipient);
         emit FundDissolved(msg.sender, recipient, amount);
     }
@@ -439,7 +495,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         if (block.timestamp > proposal.expiresAt) revert ProposalExpired();
         if (msg.sender == proposalProposer[proposalId]) revert SelfApprovalForbidden();
         if (proposalApprovals[proposalId][msg.sender]) revert AlreadyApproved();
-        if (proposal.amount > treasury.availableGrantBudget()) revert InsufficientGrantBudget();
+        if (proposal.amount > spendableGrantBudget()) revert InsufficientGrantBudget();
 
         proposalApprovals[proposalId][msg.sender] = true;
         proposal.approvalCount += 1;
@@ -447,6 +503,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         emit GrantProposalApproved(proposalId, msg.sender, proposal.approvalCount);
 
         if (proposal.approvalCount >= requiredApprovals) {
+            reservedGrantBudget += proposal.amount;
             proposal.status = GrantStatus.Approved;
             proposal.executableAt = uint64(block.timestamp) + timelockDuration;
         }
@@ -462,8 +519,26 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
         if (!isProposer && !isAdmin) revert UnauthorizedCancellation();
 
+        if (proposal.status == GrantStatus.Approved) {
+            reservedGrantBudget -= proposal.amount;
+        }
         proposal.status = GrantStatus.Cancelled;
         emit GrantProposalCancelled(proposalId, msg.sender);
+    }
+
+    /// @notice Releases reserved grant budget for an expired proposal. Callable by anyone.
+    function expireGrantProposal(uint256 proposalId) external {
+        GrantProposal storage proposal = _getProposal(proposalId);
+        if (proposal.status != GrantStatus.Pending && proposal.status != GrantStatus.Approved) {
+            revert InvalidProposalStatus();
+        }
+        if (block.timestamp <= proposal.expiresAt) revert ProposalNotExpired();
+
+        if (proposal.status == GrantStatus.Approved) {
+            reservedGrantBudget -= proposal.amount;
+        }
+        proposal.status = GrantStatus.Expired;
+        emit GrantProposalExpired(proposalId);
     }
 
     function executeGrantProposal(uint256 proposalId)
@@ -479,27 +554,71 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         if (proposal.amount > treasury.availableGrantBudget()) revert InsufficientGrantBudget();
 
         proposal.status = GrantStatus.Executed;
+        reservedGrantBudget -= proposal.amount;
         treasury.executeGrantTransfer(proposal.recipient, proposal.amount);
 
         emit GrantProposalExecuted(proposalId, msg.sender, proposal.recipient, proposal.amount);
     }
 
-    function updateConfiguration(
+    /// @notice Proposes a configuration change that becomes executable after the current timelock.
+    /// @dev Uses the *current* timelockDuration so weakening parameters cannot take effect sooner.
+    function proposeConfiguration(
         uint256 maxGrantAmount_,
         uint8 requiredApprovals_,
         uint64 timelockDuration_,
         uint64 proposalValidityPeriod_
     ) external onlyRole(CONFIG_ROLE) whenNotPaused {
+        _requireFundActive();
         _validateConfiguration(
             maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_
         );
-        maxGrantAmount = maxGrantAmount_;
-        requiredApprovals = requiredApprovals_;
-        timelockDuration = timelockDuration_;
-        proposalValidityPeriod = proposalValidityPeriod_;
-        emit ConfigurationUpdated(
-            maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_
+
+        uint64 executableAt = uint64(block.timestamp) + timelockDuration;
+        pendingConfiguration = PendingConfiguration({
+            maxGrantAmount: maxGrantAmount_,
+            requiredApprovals: requiredApprovals_,
+            timelockDuration: timelockDuration_,
+            proposalValidityPeriod: proposalValidityPeriod_,
+            executableAt: executableAt,
+            pending: true
+        });
+
+        emit ConfigurationProposed(
+            maxGrantAmount_,
+            requiredApprovals_,
+            timelockDuration_,
+            proposalValidityPeriod_,
+            executableAt
         );
+    }
+
+    function executeConfiguration() external onlyRole(CONFIG_ROLE) whenNotPaused {
+        PendingConfiguration memory pending = pendingConfiguration;
+        if (!pending.pending) revert NoPendingConfiguration();
+        if (block.timestamp < pending.executableAt) revert ConfigurationTimelockNotElapsed();
+
+        maxGrantAmount = pending.maxGrantAmount;
+        requiredApprovals = pending.requiredApprovals;
+        timelockDuration = pending.timelockDuration;
+        proposalValidityPeriod = pending.proposalValidityPeriod;
+        delete pendingConfiguration;
+
+        emit ConfigurationUpdated(
+            maxGrantAmount, requiredApprovals, timelockDuration, proposalValidityPeriod
+        );
+    }
+
+    function cancelPendingConfiguration() external {
+        if (!pendingConfiguration.pending) revert NoPendingConfiguration();
+        if (
+            !hasRole(CONFIG_ROLE, msg.sender) && !hasRole(DEFAULT_ADMIN_ROLE, msg.sender)
+                && !hasRole(GUARDIAN_ROLE, msg.sender)
+        ) {
+            revert UnauthorizedCancellation();
+        }
+
+        delete pendingConfiguration;
+        emit ConfigurationCancelled(msg.sender);
     }
 
     function pause() external onlyRole(GUARDIAN_ROLE) {
@@ -546,6 +665,24 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         return dissolution;
     }
 
+    function getPendingConfiguration() external view returns (PendingConfiguration memory) {
+        return pendingConfiguration;
+    }
+
+    /// @notice Unreserved grant budget available for new approvals.
+    function spendableGrantBudget() public view returns (uint256) {
+        uint256 available = treasury.availableGrantBudget();
+        if (available <= reservedGrantBudget) return 0;
+        return available - reservedGrantBudget;
+    }
+
+    /// @notice Unreserved accounting surplus available for new yield allocations.
+    function spendableSurplus() public view returns (uint256) {
+        uint256 surplus = treasury.accountingSurplus();
+        if (surplus <= reservedYieldSurplus) return 0;
+        return surplus - reservedYieldSurplus;
+    }
+
     function _getProposal(uint256 proposalId)
         internal
         view
@@ -562,7 +699,7 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         uint64 proposalValidityPeriod_
     ) internal pure {
         if (maxGrantAmount_ == 0) revert InvalidConfiguration();
-        if (requiredApprovals_ == 0) revert InvalidConfiguration();
+        if (requiredApprovals_ < MIN_REQUIRED_APPROVALS) revert InvalidConfiguration();
         if (timelockDuration_ < MIN_TIMELOCK_DURATION) revert InvalidConfiguration();
         if (proposalValidityPeriod_ <= timelockDuration_) revert InvalidConfiguration();
         if (proposalValidityPeriod_ < MIN_PROPOSAL_VALIDITY) revert InvalidConfiguration();
