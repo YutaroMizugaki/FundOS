@@ -11,9 +11,11 @@ import {
   type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import type { Chain } from "viem";
 import { foundry } from "viem/chains";
 import type { ExecutionResult, PolicySnapshot, StrategyContext, TransferProposal } from "./types.js";
 import { TargetWeightStrategy } from "./strategy.js";
+import { DEFAULT_JPYC_POLICY } from "./jpyc.js";
 
 const vaultAbi = [
   {
@@ -87,6 +89,8 @@ export interface AgentConfig {
   policyAddress: Address;
   executorPrivateKey: Hex;
   yieldSink: Address;
+  chain?: Chain;
+  targetCashBps?: number;
 }
 
 export class FundAgentOrchestrator {
@@ -96,13 +100,17 @@ export class FundAgentOrchestrator {
 
   constructor(private readonly config: AgentConfig) {
     const account = privateKeyToAccount(config.executorPrivateKey);
-    this.publicClient = createPublicClient({ chain: foundry, transport: http(config.rpcUrl) });
+    const chain = config.chain ?? foundry;
+    this.publicClient = createPublicClient({ chain, transport: http(config.rpcUrl) });
     this.walletClient = createWalletClient({
       account,
-      chain: foundry,
+      chain,
       transport: http(config.rpcUrl),
     });
-    this.strategy = new TargetWeightStrategy(config.yieldSink);
+    this.strategy = new TargetWeightStrategy(
+      config.yieldSink,
+      config.targetCashBps ?? DEFAULT_JPYC_POLICY.targetCashBps,
+    );
   }
 
   async readPolicySnapshot(): Promise<PolicySnapshot> {
@@ -178,9 +186,10 @@ export class FundAgentOrchestrator {
     }
 
     const hash = this.reasonHash(ctx);
+    const chain = this.config.chain ?? foundry;
     const txHash = await this.walletClient.writeContract({
       account: this.walletClient.account!,
-      chain: foundry,
+      chain,
       address: this.config.vaultAddress,
       abi: vaultAbi,
       functionName: "executeManagedTransfer",

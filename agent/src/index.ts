@@ -1,41 +1,58 @@
 /**
- * FundOS Agent entrypoint.
+ * FundOS JPYC Agent entrypoint.
  *
- * Configure via environment variables:
+ * Environment:
  * - RPC_URL
+ * - JPYC_NETWORK (ethereum | polygon | avalanche) — default: ethereum
  * - VAULT_ADDRESS
  * - POLICY_ADDRESS
  * - EXECUTOR_PRIVATE_KEY
- * - YIELD_SINK
+ * - YIELD_SINK — 利回り先 (DEX LP, レンディング等)
+ * - BASE_ASSET — optional, defaults to canonical JPYC
  */
 import type { Address } from "viem";
 import { FundAgentOrchestrator } from "./orchestrator.js";
+import {
+  DEFAULT_JPYC_POLICY,
+  JPYC_ADDRESS,
+  formatYen,
+  resolveJPYCChain,
+} from "./jpyc.js";
 
-function env(name: string): string {
-  const value = process.env[name];
+function env(name: string, fallback?: string): string {
+  const value = process.env[name] ?? fallback;
   if (!value) throw new Error(`Missing env: ${name}`);
   return value;
 }
 
 async function main() {
+  const network = env("JPYC_NETWORK", "ethereum");
+  const chain = resolveJPYCChain(network);
+  const baseAsset = (process.env.BASE_ASSET ?? JPYC_ADDRESS) as Address;
+
   const orchestrator = new FundAgentOrchestrator({
     rpcUrl: env("RPC_URL"),
     vaultAddress: env("VAULT_ADDRESS") as Address,
     policyAddress: env("POLICY_ADDRESS") as Address,
     executorPrivateKey: env("EXECUTOR_PRIVATE_KEY") as `0x${string}`,
     yieldSink: env("YIELD_SINK") as Address,
+    chain,
+    targetCashBps: DEFAULT_JPYC_POLICY.targetCashBps,
   });
 
-  const baseAsset = env("BASE_ASSET") as Address;
   const ctx = {
-    strategyId: "target-weight-v1",
+    strategyId: "jpyc-target-weight-v1",
     timestamp: Date.now(),
-    targetAllocationBps: { [baseAsset]: 2000 },
-    marketSnapshot: {},
+    targetAllocationBps: { [baseAsset]: DEFAULT_JPYC_POLICY.targetCashBps },
+    marketSnapshot: { jpycNetwork: network === "ethereum" ? 1 : 0 },
   };
 
   const result = await orchestrator.executeOnce(ctx);
-  console.log(JSON.stringify(result, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2));
+  const output = {
+    ...result,
+    amountYen: result.proposal.amount > 0n ? formatYen(result.proposal.amount) : null,
+  };
+  console.log(JSON.stringify(output, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2));
 }
 
 main().catch((err) => {
