@@ -1,83 +1,65 @@
 #!/usr/bin/env node
 import { formatUnits, parseUnits } from "@fundos/core";
-import {
-  createKosenFund,
-  listKosen,
-  submitKosenGrant,
-} from "@fundos/kosen";
-import { AutonomousKosenAgent } from "./agent.js";
+import { PitchVoteAgent } from "./agent.js";
 
 function main(): void {
-  console.log("FundOS — 高専拠出 自立駆動デモ\n");
+  console.log("FundOS — 高専ピッチ投票デモ\n");
+  console.log("流れ: 拠出（投票権）→ 学生プレゼン → 投票 → 按分執行\n");
 
-  const fund = createKosenFund({
-    initialDeposit: parseUnits("5000000"),
-    reserveFloorRatio: 0.25,
-    maxDisbursementRatio: 0.04,
-    monthlySpendCapRatio: 0.08,
-  });
-
-  console.log("① 基金組成");
-  console.log(fund.summary());
-  console.log("");
-
-  console.log("② 個別助成（東京高専・ロボコン）");
-  const one = submitKosenGrant(fund, {
-    kosenId: "kosen_tokyo",
-    amount: parseUnits("25000"),
-    category: "competition",
-    rationale: "高専ロボコン出場機材",
-  });
-  const processed = fund.autoProcess(one.id);
+  const agent = PitchVoteAgent.bootstrap();
+  const seeded = agent.seedDemo("2026 春・高専ピッチデー");
+  console.log("① 拠出者と学生ピッチを準備");
   console.log(
-    `  → ${processed.proposal.status}: ${processed.decision.reason}`,
+    `  拠出者 ${seeded.contributorCount} / ピッチ ${seeded.pitchCount} / round ${seeded.roundId}`,
   );
+  console.log(agent.fund.summary());
   console.log("");
 
-  console.log("③ マンデート外は自動却下");
-  const bad = fund.submitProposal({
-    recipientId: "corp_x",
-    recipientName: "無関係な法人",
-    amount: parseUnits("10000"),
-    category: "real-estate",
-    rationale: "土地購入",
-  });
-  const badResult = fund.autoProcess(bad.id);
-  console.log(`  → ${badResult.proposal.status}: ${badResult.decision.reason}`);
-  console.log("");
-
-  console.log("④ エージェント: 東海エリア均等拠出");
-  const agent = new AutonomousKosenAgent(fund, {
-    mode: "equal-share",
-    region: "東海",
-    category: "equipment",
-    perSchoolCap: "30000",
-  });
-  const tick = agent.tick();
-  for (const e of tick.executed) {
+  console.log("② 学生プレゼン一覧");
+  for (const p of agent.fund.pitchesForRound(seeded.roundId)) {
     console.log(
-      `  ✓ ${e.recipientName}  ${formatUnits(e.amount)}  (${e.category})`,
+      `  · ${p.studentName}（${p.schoolName}）「${p.title}」希望 ${formatUnits(p.requestedAmount)}`,
+    );
+    console.log(`    ${p.abstract}`);
+  }
+  console.log("");
+
+  console.log("③ 拠出者が投票 → ラウンド確定");
+  const result = agent.settleWithHeuristic();
+  for (const p of result.pitches) {
+    const mark = p.fundedAmount > 0n ? "✓" : "·";
+    console.log(
+      `  ${mark} ${p.studentName}  票=${formatUnits(p.votesReceived)}  配分=${formatUnits(p.fundedAmount)}  [${p.status}]`,
     );
   }
-  console.log(`  ${tick.notes.join(" / ")}`);
   console.log("");
 
-  console.log("⑤ エージェント: 四国ラウンドロビン ×3");
-  const rr = new AutonomousKosenAgent(fund, {
-    mode: "round-robin",
-    region: "四国",
-    category: "scholarship",
-    roundRobinAmount: "15000",
-  });
-  rr.run(3);
-  console.log(rr.report());
+  console.log("④ 追加ピッチを手動で拒否される例（マンデート外）");
+  try {
+    const fund = agent.fund;
+    fund.contribute({ name: "新規拠出者", amount: parseUnits("50000") });
+    // need new round
+    const round = fund.openRound({
+      title: "次ラウンド",
+      budgetRatio: 0.3,
+    });
+    fund.submitPitch({
+      roundId: round.id,
+      studentName: "誰か",
+      schoolId: "corp",
+      schoolName: "無関係",
+      title: "土地購入",
+      abstract: "x",
+      category: "real-estate",
+      requestedAmount: parseUnits("10000"),
+    });
+  } catch (e) {
+    console.log(`  → 期待どおり却下: ${(e as Error).message}`);
+  }
   console.log("");
 
-  console.log("⑥ 最終状態");
-  console.log(fund.summary());
-  console.log(
-    `登録高専数: ${listKosen().length} / 対象例(近畿): ${listKosen({ region: "近畿" }).map((k) => k.shortName).join(", ")}`,
-  );
+  console.log("⑤ 最終レポート");
+  console.log(agent.report());
 }
 
 main();

@@ -4,74 +4,82 @@ import {
   createKosenFund,
   KOSEN_REGISTRY,
   listKosen,
-  runEqualShareCycle,
-  runRoundRobinGrant,
-  submitKosenGrant,
+  openPitchRound,
+  runVoteAndSettle,
+  seedDemoArena,
+  submitStudentPitch,
 } from "./index.js";
 
-describe("@fundos/kosen", () => {
+describe("@fundos/kosen pitch-vote", () => {
   it("has a non-empty national registry", () => {
     expect(KOSEN_REGISTRY.length).toBeGreaterThan(40);
     expect(listKosen({ region: "関東信越" }).length).toBeGreaterThan(3);
   });
 
-  it("creates kosen fund and executes a grant", () => {
-    const fund = createKosenFund({
-      initialDeposit: parseUnits("2000000"),
+  it("seeds arena and settles by contributor votes", () => {
+    const fund = createKosenFund();
+    const { contributors, pitches, roundId } = seedDemoArena(fund, {
+      region: "東海",
     });
-    const p = submitKosenGrant(fund, {
+    expect(contributors.length).toBe(3);
+    expect(pitches.length).toBeGreaterThanOrEqual(2);
+
+    const [c0, c1, c2] = contributors;
+    const [p0, p1, p2] = pitches;
+    const result = runVoteAndSettle(fund, roundId, [
+      {
+        contributorId: c0!.id,
+        allocations: [
+          { pitchId: p0!.id, weight: parseUnits("200000") },
+          { pitchId: p1!.id, weight: parseUnits("100000") },
+        ],
+      },
+      {
+        contributorId: c1!.id,
+        allocations: [{ pitchId: p1!.id, weight: parseUnits("150000") }],
+      },
+      {
+        contributorId: c2!.id,
+        allocations: [
+          { pitchId: p2?.id ?? p0!.id, weight: parseUnits("200000") },
+        ],
+      },
+    ]);
+
+    expect(result.round.status).toBe("settled");
+    expect(result.executed.length).toBeGreaterThan(0);
+    const funded = result.pitches.filter((p) => p.fundedAmount > 0n);
+    expect(funded.length).toBeGreaterThan(0);
+  });
+
+  it("submitStudentPitch resolves kosen school", () => {
+    const fund = createKosenFund();
+    fund.contribute({ name: "X", amount: parseUnits("100000") });
+    const round = openPitchRound(fund, "R", { budgetRatio: 0.4 });
+    const pitch = submitStudentPitch(fund, {
+      roundId: round.id,
+      studentName: "山田",
       kosenId: "kosen_tokyo",
-      amount: parseUnits("20000"),
-      category: "competition",
-      rationale: "高専ロボコン出場支援",
+      title: "テスト",
+      abstract: "要旨",
+      category: "research",
+      requestedAmount: parseUnits("10000"),
     });
-    const { proposal } = fund.autoProcess(p.id);
-    expect(proposal.status).toBe("executed");
-  });
-
-  it("runs equal-share monthly cycle across a subset", () => {
-    const fund = createKosenFund({
-      initialDeposit: parseUnits("5000000"),
-      monthlySpendCapRatio: 0.1,
-      maxDisbursementRatio: 0.05,
-    });
-    const schools = listKosen({ region: "東海" });
-    const result = runEqualShareCycle(fund, {
-      schools,
-      category: "equipment",
-      perSchoolCap: "50000",
-    });
-    expect(result.submitted.length).toBe(schools.length);
-    expect(result.executed.length).toBe(schools.length);
-    expect(result.rejected.length).toBe(0);
-  });
-
-  it("round-robin advances cursor", () => {
-    const fund = createKosenFund({
-      initialDeposit: parseUnits("3000000"),
-    });
-    const schools = listKosen({ region: "四国" });
-    const a = runRoundRobinGrant(fund, 0, {
-      amount: parseUnits("15000"),
-      schools,
-    });
-    const b = runRoundRobinGrant(fund, a.nextCursor, {
-      amount: parseUnits("15000"),
-      schools,
-    });
-    expect(a.proposal?.recipientId).not.toBe(b.proposal?.recipientId);
-    expect(a.proposal?.status).toBe("executed");
-    expect(b.proposal?.status).toBe("executed");
+    expect(pitch.schoolName).toContain("東京");
   });
 
   it("rejects unknown kosen id", () => {
-    const fund = createKosenFund({ initialDeposit: parseUnits("1000000") });
+    const fund = createKosenFund();
+    fund.contribute({ name: "X", amount: parseUnits("100000") });
+    openPitchRound(fund, "R", { budgetRatio: 0.4 });
     expect(() =>
-      submitKosenGrant(fund, {
+      submitStudentPitch(fund, {
+        studentName: "Y",
         kosenId: "kosen_unknown",
-        amount: parseUnits("1000"),
+        title: "x",
+        abstract: "y",
         category: "research",
-        rationale: "x",
+        requestedAmount: parseUnits("1000"),
       }),
     ).toThrow(/Unknown kosen/);
   });

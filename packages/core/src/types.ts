@@ -12,6 +12,15 @@ export type ProposalStatus =
   | "executed"
   | "cancelled";
 
+export type RoundStatus = "pitching" | "voting" | "settled";
+
+export type PitchStatus =
+  | "submitted"
+  | "funded"
+  | "partial"
+  | "unfunded"
+  | "withdrawn";
+
 export interface Mandate {
   /** Human-readable purpose of the fund. */
   purpose: string;
@@ -38,7 +47,12 @@ export interface FundConfig {
 export interface LedgerEntry {
   id: string;
   at: Timestamp;
-  kind: "deposit" | "disbursement" | "reserve_lock" | "reserve_release" | "note";
+  kind:
+    | "deposit"
+    | "disbursement"
+    | "reserve_lock"
+    | "reserve_release"
+    | "note";
   amount: Amount;
   balanceAfter: Amount;
   memo: string;
@@ -59,6 +73,61 @@ export interface DisbursementProposal {
   executedAt?: Timestamp;
 }
 
+/** 拠出者 — 拠出額に応じて投票権を持つ */
+export interface Contributor {
+  id: string;
+  name: string;
+  contributed: Amount;
+  /** 1 最小単位の拠出 = 1 投票権（MVP） */
+  votingPower: Amount;
+  createdAt: Timestamp;
+}
+
+/** 学生プレゼン（ピッチ） */
+export interface Pitch {
+  id: string;
+  roundId: string;
+  createdAt: Timestamp;
+  studentName: string;
+  /** 所属高専など */
+  schoolId: string;
+  schoolName: string;
+  title: string;
+  /** プレゼン要旨 */
+  abstract: string;
+  category: string;
+  requestedAmount: Amount;
+  status: PitchStatus;
+  votesReceived: Amount;
+  fundedAmount: Amount;
+}
+
+export interface VoteAllocation {
+  pitchId: string;
+  weight: Amount;
+}
+
+export interface VoteBallot {
+  id: string;
+  roundId: string;
+  contributorId: string;
+  at: Timestamp;
+  allocations: VoteAllocation[];
+}
+
+export interface FundingRound {
+  id: string;
+  title: string;
+  status: RoundStatus;
+  openedAt: Timestamp;
+  votingOpenedAt?: Timestamp;
+  settledAt?: Timestamp;
+  /** このラウンドで配分可能な予算上限 */
+  budget: Amount;
+  pitchIds: string[];
+  ballots: VoteBallot[];
+}
+
 export interface FundState {
   config: FundConfig;
   status: FundStatus;
@@ -69,6 +138,9 @@ export interface FundState {
   ledger: LedgerEntry[];
   /** ISO month key → amount spent that month. */
   monthlySpent: Record<string, Amount>;
+  contributors: Contributor[];
+  pitches: Pitch[];
+  rounds: FundingRound[];
 }
 
 export function monthKey(iso: Timestamp = new Date().toISOString()): string {

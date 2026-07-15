@@ -1,110 +1,136 @@
 import { describe, expect, it } from "vitest";
 import { FundVault, parseUnits, formatUnits } from "./index.js";
 
-describe("FundVault", () => {
-  const mandate = {
-    purpose: "高専への教育・研究支援",
-    allowedCategories: ["equipment", "scholarship", "research"],
-    scope: "日本の高等専門学校",
-  };
+const mandate = {
+  purpose: "高専学生のプレゼンに対し、拠出者投票で配分する",
+  allowedCategories: ["equipment", "scholarship", "research", "competition"],
+  scope: "日本の高等専門学校の学生プロジェクト",
+};
 
-  it("creates fund with reserve lock", () => {
+describe("FundVault pitch-vote governance", () => {
+  it("grants voting power on contribute", () => {
+    const fund = FundVault.create({ name: "高専ピッチ基金", mandate });
+    const a = fund.contribute({ name: "Alice", amount: parseUnits("100000") });
+    const b = fund.contribute({ name: "Bob", amount: parseUnits("50000") });
+    expect(a.votingPower).toBe(parseUnits("100000"));
+    expect(b.votingPower).toBe(parseUnits("50000"));
+    expect(fund.getState().contributors).toHaveLength(2);
+  });
+
+  it("runs pitch → vote → proportional settle", () => {
     const fund = FundVault.create({
-      name: "高専基金",
+      name: "高専ピッチ基金",
       mandate,
-      initialDeposit: parseUnits("1000000"),
       reserveFloorRatio: 0.2,
+      maxDisbursementRatio: 0.5,
+      monthlySpendCapRatio: 0.8,
     });
-    const s = fund.getState();
-    expect(s.reserved).toBe(parseUnits("200000"));
-    expect(s.cash).toBe(parseUnits("800000"));
-    expect(s.status).toBe("active");
-  });
+    const alice = fund.contribute({
+      name: "Alice",
+      amount: parseUnits("400000"),
+    });
+    const bob = fund.contribute({ name: "Bob", amount: parseUnits("100000") });
 
-  it("approves in-mandate kosen grant and executes", () => {
-    const fund = FundVault.create({
-      name: "高専基金",
-      mandate,
-      initialDeposit: parseUnits("1000000"),
-      maxDisbursementRatio: 0.05,
-      monthlySpendCapRatio: 0.1,
+    const round = fund.openRound({
+      title: "2026 春ピッチ",
+      budgetRatio: 0.5,
     });
-    const p = fund.submitProposal({
-      recipientId: "kosen_tokyo",
-      recipientName: "東京工業高等専門学校",
-      amount: parseUnits("30000"),
-      category: "equipment",
-      rationale: "ロボコン用部品",
-    });
-    const { decision, proposal } = fund.autoProcess(p.id);
-    expect(decision.approved).toBe(true);
-    expect(proposal.status).toBe("executed");
-    expect(fund.getState().cash).toBe(parseUnits("770000"));
-  });
-
-  it("rejects out-of-mandate category", () => {
-    const fund = FundVault.create({
-      name: "高専基金",
-      mandate,
-      initialDeposit: parseUnits("1000000"),
-    });
-    const p = fund.submitProposal({
-      recipientId: "kosen_tokyo",
-      recipientName: "東京工業高等専門学校",
-      amount: parseUnits("10000"),
-      category: "real-estate",
-      rationale: "土地購入",
-    });
-    const { decision, proposal } = fund.autoProcess(p.id);
-    expect(decision.approved).toBe(false);
-    expect(proposal.status).toBe("rejected");
-  });
-
-  it("rejects when monthly cap exceeded", () => {
-    const fund = FundVault.create({
-      name: "高専基金",
-      mandate,
-      initialDeposit: parseUnits("1000000"),
-      maxDisbursementRatio: 0.1,
-      monthlySpendCapRatio: 0.05,
-    });
-    const a = fund.submitProposal({
-      recipientId: "kosen_a",
-      recipientName: "A高専",
-      amount: parseUnits("40000"),
-      category: "scholarship",
-      rationale: "奨学金",
-    });
-    fund.autoProcess(a.id);
-    const b = fund.submitProposal({
-      recipientId: "kosen_b",
-      recipientName: "B高専",
-      amount: parseUnits("20000"),
-      category: "scholarship",
-      rationale: "奨学金",
-    });
-    const { decision } = fund.autoProcess(b.id);
-    expect(decision.approved).toBe(false);
-    expect(decision.reason).toContain("monthly-spend-cap");
-  });
-
-  it("pause blocks disbursement", () => {
-    const fund = FundVault.create({
-      name: "高専基金",
-      mandate,
-      initialDeposit: parseUnits("1000000"),
-    });
-    fund.pause();
-    const p = fund.submitProposal({
-      recipientId: "kosen_tokyo",
-      recipientName: "東京工業高等専門学校",
-      amount: parseUnits("10000"),
+    const p1 = fund.submitPitch({
+      roundId: round.id,
+      studentName: "佐藤",
+      schoolId: "kosen_tokyo",
+      schoolName: "東京高専",
+      title: "水中ドローン",
+      abstract: "湖沼調査用の安価な水中ドローン",
       category: "research",
-      rationale: "研究費",
+      requestedAmount: parseUnits("80000"),
     });
-    const { decision } = fund.autoProcess(p.id);
-    expect(decision.approved).toBe(false);
-    expect(decision.reason).toContain("fund-active");
+    const p2 = fund.submitPitch({
+      roundId: round.id,
+      studentName: "鈴木",
+      schoolId: "kosen_toyota",
+      schoolName: "豊田高専",
+      title: "ロボコン駆動系",
+      abstract: "軽量高出力の駆動モジュール",
+      category: "competition",
+      requestedAmount: parseUnits("60000"),
+    });
+
+    fund.openVoting(round.id);
+    fund.castVote(round.id, alice.id, [
+      { pitchId: p1.id, weight: parseUnits("300000") },
+      { pitchId: p2.id, weight: parseUnits("100000") },
+    ]);
+    fund.castVote(round.id, bob.id, [
+      { pitchId: p2.id, weight: parseUnits("100000") },
+    ]);
+
+    const result = fund.settle(round.id);
+    expect(result.round.status).toBe("settled");
+    expect(result.executed.length).toBe(2);
+
+    const state = fund.getState();
+    const pitch1 = state.pitches.find((p) => p.id === p1.id)!;
+    const pitch2 = state.pitches.find((p) => p.id === p2.id)!;
+    // votes: p1=300k, p2=200k, total=500k
+    // budget = 50% of cash after reserve — verify both got some funding
+    expect(pitch1.votesReceived).toBe(parseUnits("300000"));
+    expect(pitch2.votesReceived).toBe(parseUnits("200000"));
+    expect(pitch1.fundedAmount).toBeGreaterThan(0n);
+    expect(pitch2.fundedAmount).toBeGreaterThan(0n);
+    expect(pitch1.fundedAmount).toBeGreaterThan(pitch2.fundedAmount);
+  });
+
+  it("rejects votes exceeding voting power", () => {
+    const fund = FundVault.create({ name: "高専ピッチ基金", mandate });
+    const alice = fund.contribute({
+      name: "Alice",
+      amount: parseUnits("10000"),
+    });
+    const round = fund.openRound({ title: "R1", budget: parseUnits("5000") });
+    const pitch = fund.submitPitch({
+      roundId: round.id,
+      studentName: "A",
+      schoolId: "kosen_tokyo",
+      schoolName: "東京高専",
+      title: "T",
+      abstract: "x",
+      category: "research",
+      requestedAmount: parseUnits("5000"),
+    });
+    fund.openVoting(round.id);
+    expect(() =>
+      fund.castVote(round.id, alice.id, [
+        { pitchId: pitch.id, weight: parseUnits("10001") },
+      ]),
+    ).toThrow(/voting power/);
+  });
+
+  it("rejects out-of-mandate pitch category", () => {
+    const fund = FundVault.create({ name: "高専ピッチ基金", mandate });
+    fund.contribute({ name: "Alice", amount: parseUnits("100000") });
+    const round = fund.openRound({ title: "R1", budgetRatio: 0.3 });
+    expect(() =>
+      fund.submitPitch({
+        roundId: round.id,
+        studentName: "A",
+        schoolId: "kosen_tokyo",
+        schoolName: "東京高専",
+        title: "土地",
+        abstract: "x",
+        category: "real-estate",
+        requestedAmount: parseUnits("1000"),
+      }),
+    ).toThrow(/mandate/);
+  });
+
+  it("pause blocks contribute and settle path", () => {
+    const fund = FundVault.create({ name: "高専ピッチ基金", mandate });
+    fund.contribute({ name: "Alice", amount: parseUnits("100000") });
+    fund.pause();
+    expect(() =>
+      fund.contribute({ name: "Bob", amount: parseUnits("1000") }),
+    ).toThrow(/paused/);
   });
 
   it("formats units", () => {

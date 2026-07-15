@@ -1,184 +1,131 @@
 import {
+  formatUnits,
   parseUnits,
-  type DisbursementProposal,
   type FundVault,
+  type SettleResult,
 } from "@fundos/core";
 import {
-  listKosen,
-  runEqualShareCycle,
-  runRoundRobinGrant,
-  submitKosenGrant,
+  createKosenFund,
+  openPitchRound,
+  runVoteAndSettle,
+  seedDemoArena,
+  submitStudentPitch,
   type KosenGrantCategory,
-  type KosenRegion,
 } from "@fundos/kosen";
 
-export type AgentMode = "equal-share" | "round-robin" | "drain-pending";
-
-export interface AgentTickResult {
-  mode: AgentMode;
-  at: string;
-  executed: DisbursementProposal[];
-  rejected: DisbursementProposal[];
-  notes: string[];
-}
-
-export interface AutonomousKosenAgentOptions {
-  mode?: AgentMode;
-  region?: KosenRegion;
-  category?: KosenGrantCategory;
-  /** Round-robin amount in major units. */
-  roundRobinAmount?: string;
-  perSchoolCap?: string;
-}
+export type AgentPhase =
+  | "idle"
+  | "seeded"
+  | "voting"
+  | "settled";
 
 /**
- * Policy-bounded autonomous loop for the KOSEN grant fund.
- * Spending is always gated by FundVault policy + KOSEN mandate.
+ * Orchestrates a pitch-vote round for demos.
+ * Does not invent votes — applies explicit ballots or a simple preference heuristic.
  */
-export class AutonomousKosenAgent {
-  private cursor = 0;
-  private readonly mode: AgentMode;
-  private readonly region?: KosenRegion;
-  private readonly category: KosenGrantCategory;
-  private readonly roundRobinAmount: string;
-  private readonly perSchoolCap: string;
-  readonly history: AgentTickResult[] = [];
+export class PitchVoteAgent {
+  phase: AgentPhase = "idle";
+  lastResult: SettleResult | null = null;
+  roundId: string | null = null;
 
-  constructor(
-    private readonly fund: FundVault,
-    options: AutonomousKosenAgentOptions = {},
-  ) {
-    this.mode = options.mode ?? "equal-share";
-    this.region = options.region;
-    this.category = options.category ?? "equipment";
-    this.roundRobinAmount = options.roundRobinAmount ?? "20000";
-    this.perSchoolCap = options.perSchoolCap ?? "40000";
+  constructor(readonly fund: FundVault) {}
+
+  static bootstrap(): PitchVoteAgent {
+    return new PitchVoteAgent(createKosenFund());
   }
 
-  getCursor(): number {
-    return this.cursor;
-  }
-
-  tick(): AgentTickResult {
-    const at = new Date().toISOString();
-    const notes: string[] = [];
-    let executed: DisbursementProposal[] = [];
-    let rejected: DisbursementProposal[] = [];
-
-    const schools = this.region
-      ? listKosen({ region: this.region })
-      : listKosen();
-
-    if (this.fund.getState().status !== "active") {
-      notes.push("基金が停止中のためスキップ");
-      const result: AgentTickResult = {
-        mode: this.mode,
-        at,
-        executed,
-        rejected,
-        notes,
-      };
-      this.history.push(result);
-      return result;
-    }
-
-    switch (this.mode) {
-      case "equal-share": {
-        const cycle = runEqualShareCycle(this.fund, {
-          schools,
-          category: this.category,
-          perSchoolCap: this.perSchoolCap,
-        });
-        executed = cycle.executed;
-        rejected = cycle.rejected;
-        notes.push(
-          `均等拠出: ${schools.length} 校対象 / 実行 ${executed.length} / 却下 ${rejected.length}`,
-        );
-        break;
-      }
-      case "round-robin": {
-        const { nextCursor, proposal } = runRoundRobinGrant(
-          this.fund,
-          this.cursor,
-          {
-            amount: parseUnits(this.roundRobinAmount),
-            category: this.category,
-            schools,
-          },
-        );
-        this.cursor = nextCursor;
-        if (proposal?.status === "executed") executed = [proposal];
-        else if (proposal) rejected = [proposal];
-        notes.push(
-          `ラウンドロビン cursor→${this.cursor}: ${proposal?.recipientName ?? "なし"} (${proposal?.status ?? "n/a"})`,
-        );
-        break;
-      }
-      case "drain-pending": {
-        for (const p of this.fund.pendingProposals()) {
-          const { proposal } = this.fund.autoProcess(p.id);
-          if (proposal.status === "executed") executed.push(proposal);
-          else rejected.push(proposal);
-        }
-        notes.push(
-          `保留案件処理: 実行 ${executed.length} / 却下 ${rejected.length}`,
-        );
-        break;
-      }
-    }
-
-    const result: AgentTickResult = {
-      mode: this.mode,
-      at,
-      executed,
-      rejected,
-      notes,
+  /** Seed contributors + student pitches (demo). */
+  seedDemo(roundTitle = "高専ピッチデー"): {
+    roundId: string;
+    pitchCount: number;
+    contributorCount: number;
+  } {
+    const { contributors, pitches, roundId } = seedDemoArena(this.fund, {
+      roundTitle,
+      region: "東海",
+    });
+    this.roundId = roundId;
+    this.phase = "seeded";
+    return {
+      roundId,
+      pitchCount: pitches.length,
+      contributorCount: contributors.length,
     };
-    this.history.push(result);
-    return result;
   }
 
-  run(ticks = 1): AgentTickResult[] {
-    const out: AgentTickResult[] = [];
-    for (let i = 0; i < ticks; i++) out.push(this.tick());
-    return out;
-  }
+  /**
+   * Auto-ballot: each contributor puts all votes on the pitch whose
+   * requested amount is closest to a preference (demo heuristic only).
+   */
+  settleWithHeuristic(): SettleResult {
+    if (!this.roundId) throw new Error("No round — call seedDemo first");
+    const state = this.fund.getState();
+    const pitches = state.pitches.filter((p) => p.roundId === this.roundId);
+    if (pitches.length === 0) throw new Error("No pitches");
 
-  /** Seed demo proposals without executing (for drain-pending demos). */
-  seedDemoProposals(count = 3): DisbursementProposal[] {
-    const schools = this.region
-      ? listKosen({ region: this.region })
-      : listKosen();
-    const seeded: DisbursementProposal[] = [];
-    for (let i = 0; i < Math.min(count, schools.length); i++) {
-      const school = schools[i]!;
-      seeded.push(
-        submitKosenGrant(this.fund, {
-          kosenId: school.id,
-          amount: parseUnits("12000"),
-          category: "research",
-          rationale: `${school.shortName} 研究萌芽支援（デモ申請）`,
-        }),
-      );
+    this.fund.openVoting(this.roundId);
+    this.phase = "voting";
+
+    for (const c of state.contributors) {
+      // Prefer competition / research alternately by contributor index
+      const prefer: KosenGrantCategory =
+        c.name.includes("企業") ? "competition" : "research";
+      const ranked = [...pitches].sort((a, b) => {
+        const as = a.category === prefer ? 0 : 1;
+        const bs = b.category === prefer ? 0 : 1;
+        return as - bs;
+      });
+      const top = ranked[0]!;
+      const second = ranked[1];
+      const allocations =
+        second && c.votingPower > parseUnits("50000")
+          ? [
+              {
+                pitchId: top.id,
+                weight: (c.votingPower * 2n) / 3n,
+              },
+              {
+                pitchId: second.id,
+                weight: c.votingPower - (c.votingPower * 2n) / 3n,
+              },
+            ]
+          : [{ pitchId: top.id, weight: c.votingPower }];
+      this.fund.castVote(this.roundId, c.id, allocations);
     }
-    return seeded;
+
+    this.lastResult = this.fund.settle(this.roundId);
+    this.phase = "settled";
+    return this.lastResult;
+  }
+
+  settleWithBallots(
+    ballots: Parameters<typeof runVoteAndSettle>[2],
+  ): SettleResult {
+    if (!this.roundId) throw new Error("No round");
+    this.lastResult = runVoteAndSettle(this.fund, this.roundId, ballots);
+    this.phase = "settled";
+    return this.lastResult;
   }
 
   report(): string {
     const s = this.fund.summary();
     const lines = [
-      `=== FundOS Agent Report ===`,
+      "=== FundOS Pitch-Vote Report ===",
       `基金: ${s.name} [${s.status}]`,
       `NAV: ${s.nav} / 現金 ${s.cash} / 準備金 ${s.reserved}`,
-      `提案: ${s.proposals}（保留 ${s.pending} / 実行済 ${s.executed}）`,
-      `モード: ${this.mode}`,
-      `ticks: ${this.history.length}`,
+      `拠出者: ${s.contributors}（投票権合計 ${s.totalVotingPower}）`,
+      `ピッチ: ${s.pitches} / ラウンド: ${s.rounds}`,
+      `フェーズ: ${this.phase}`,
     ];
-    for (const h of this.history.slice(-5)) {
-      lines.push(
-        `- ${h.at}: 実行${h.executed.length} 却下${h.rejected.length} — ${h.notes.join("; ")}`,
-      );
+    if (this.lastResult) {
+      for (const p of this.lastResult.pitches) {
+        lines.push(
+          `- ${p.studentName}「${p.title}」票 ${formatUnits(p.votesReceived)} → 配分 ${formatUnits(p.fundedAmount)} [${p.status}]`,
+        );
+      }
     }
     return lines.join("\n");
   }
 }
+
+export { openPitchRound, submitStudentPitch, createKosenFund };
