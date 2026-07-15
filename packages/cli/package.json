@@ -1,0 +1,21 @@
+{
+  "name": "@fundos/cli",
+  "version": "0.1.0",
+  "description": "FundOS CLI demo",
+  "type": "module",
+  "bin": {
+    "fundos": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "demo": "node --import tsx src/index.ts demo"
+  },
+  "dependencies": {
+    "@fundos/agent": "0.1.0",
+    "@fundos/core": "0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

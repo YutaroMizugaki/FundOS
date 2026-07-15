@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+coverage/
+.coverage*
+cache/
+artifacts/
+contracts/cache/
+contracts/artifacts/
+typechain-types/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.turbo/
+*.tsbuildinfo

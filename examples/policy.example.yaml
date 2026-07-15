@@ -1,0 +1,30 @@
+# Example Fund Policy (declarative)
+
+# このファイルは意図のドキュメントです。
+# 実行時のソース・オブ・トゥルースは TypeScript PolicyEngine / Solidity FundPolicy です。
+
+fund:
+  name: 自立駆動デモ基金
+  base_asset: USDC
+  mandate:
+    purpose: ポリシーに従い、人手なしで助成を審査・実行する
+    allowed_categories:
+      - public-goods
+      - climate
+      - education
+    scope: global
+
+constraints:
+  reserve_floor_ratio: 0.20          # NAV の 20% を常時確保
+  max_disbursement_ratio: 0.05       # 単筆は NAV の 5% まで
+
+schedule:
+  agent_tick_interval_ms: 5000       # 自律エージェントの評価周期
+
+autonomy:
+  auto_approve_when_policy_passes: true
+  auto_execute_when_approved: true
+  human_roles:
+    - set_mandate
+    - update_policy_parameters
+    - pause_fund
