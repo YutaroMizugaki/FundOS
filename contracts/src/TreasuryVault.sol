@@ -90,7 +90,11 @@ contract TreasuryVault is ReentrancyGuard, Pausable {
     }
 
     /// @notice Executes an approved grant transfer. Only callable by GrantController.
-    function executeGrantTransfer(address recipient, uint256 amount) external nonReentrant whenNotPaused {
+    function executeGrantTransfer(address recipient, uint256 amount)
+        external
+        nonReentrant
+        whenNotPaused
+    {
         if (msg.sender != grantController) revert OnlyGrantController();
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
@@ -103,7 +107,12 @@ contract TreasuryVault is ReentrancyGuard, Pausable {
 
     /// @notice Reclassifies verified realized yield already held by the treasury as grant budget.
     /// @dev No tokens move. The controller must complete its approval and timelock workflow first.
-    function recognizeYield(uint256 amount, bytes32 evidenceHash) external nonReentrant whenNotPaused onlyActive {
+    function recognizeYield(uint256 amount, bytes32 evidenceHash)
+        external
+        nonReentrant
+        whenNotPaused
+        onlyActive
+    {
         if (msg.sender != grantController) revert OnlyGrantController();
         if (amount == 0) revert ZeroAmount();
         if (amount > accountingSurplus()) revert InsufficientAccountingSurplus();

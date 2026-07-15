@@ -128,13 +128,21 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         string metadataURI,
         uint64 expiresAt
     );
-    event GrantProposalApproved(uint256 indexed proposalId, address indexed approver, uint8 approvalCount);
+    event GrantProposalApproved(
+        uint256 indexed proposalId, address indexed approver, uint8 approvalCount
+    );
     event GrantProposalCancelled(uint256 indexed proposalId, address indexed cancelledBy);
     event GrantProposalExecuted(
-        uint256 indexed proposalId, address indexed executor, address indexed recipient, uint256 amount
+        uint256 indexed proposalId,
+        address indexed executor,
+        address indexed recipient,
+        uint256 amount
     );
     event ConfigurationUpdated(
-        uint256 maxGrantAmount, uint8 requiredApprovals, uint64 timelockDuration, uint64 proposalValidityPeriod
+        uint256 maxGrantAmount,
+        uint8 requiredApprovals,
+        uint64 timelockDuration,
+        uint64 proposalValidityPeriod
     );
     event FundPaused(address account);
     event FundUnpaused(address account);
@@ -146,11 +154,18 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         string metadataURI,
         uint64 expiresAt
     );
-    event YieldAllocationApproved(uint256 indexed allocationId, address indexed approver, uint8 approvalCount);
+    event YieldAllocationApproved(
+        uint256 indexed allocationId, address indexed approver, uint8 approvalCount
+    );
     event YieldAllocationCancelled(uint256 indexed allocationId, address indexed cancelledBy);
-    event YieldAllocated(uint256 indexed allocationId, address indexed executor, uint256 amount, bytes32 evidenceHash);
+    event YieldAllocated(
+        uint256 indexed allocationId, address indexed executor, uint256 amount, bytes32 evidenceHash
+    );
     event DissolutionInitiated(
-        address indexed proposer, bytes32 indexed resolutionHash, string metadataURI, uint64 expiresAt
+        address indexed proposer,
+        bytes32 indexed resolutionHash,
+        string metadataURI,
+        uint64 expiresAt
     );
     event DissolutionApproved(address indexed approver, uint8 approvalCount, uint64 executableAt);
     event DissolutionCancelled(address indexed cancelledBy);
@@ -172,10 +187,13 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         uint64 proposalValidityPeriod_
     ) AccessControlDefaultAdminRules(adminTransferDelay, admin) {
         if (
-            address(constitution_) == address(0) || address(treasury_) == address(0) || proposer == address(0)
-                || approver == address(0) || executor == address(0) || guardian == address(0) || config == address(0)
+            address(constitution_) == address(0) || address(treasury_) == address(0)
+                || proposer == address(0) || approver == address(0) || executor == address(0)
+                || guardian == address(0) || config == address(0)
         ) revert ZeroAddress();
-        _validateConfiguration(maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_);
+        _validateConfiguration(
+            maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_
+        );
 
         constitution = constitution_;
         treasury = treasury_;
@@ -190,17 +208,18 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         _grantRole(GUARDIAN_ROLE, guardian);
         _grantRole(CONFIG_ROLE, config);
 
-        emit ConfigurationUpdated(maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_);
+        emit ConfigurationUpdated(
+            maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_
+        );
     }
 
     /// @notice Creates an attested proposal to reclassify realized yield as grant budget.
     /// @dev The amount must already exist as unaccounted JPYC surplus in the treasury.
-    function createYieldAllocation(uint256 amount, bytes32 evidenceHash, string calldata metadataURI)
-        external
-        onlyRole(CONFIG_ROLE)
-        whenNotPaused
-        returns (uint256 allocationId)
-    {
+    function createYieldAllocation(
+        uint256 amount,
+        bytes32 evidenceHash,
+        string calldata metadataURI
+    ) external onlyRole(CONFIG_ROLE) whenNotPaused returns (uint256 allocationId) {
         _requireFundActive();
         if (amount == 0) revert ZeroAmount();
         if (amount > treasury.accountingSurplus()) revert InsufficientAccountingSurplus();
@@ -221,10 +240,16 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
             status: GovernanceStatus.Pending
         });
 
-        emit YieldAllocationCreated(allocationId, msg.sender, amount, evidenceHash, metadataURI, expiresAt);
+        emit YieldAllocationCreated(
+            allocationId, msg.sender, amount, evidenceHash, metadataURI, expiresAt
+        );
     }
 
-    function approveYieldAllocation(uint256 allocationId) external onlyRole(APPROVER_ROLE) whenNotPaused {
+    function approveYieldAllocation(uint256 allocationId)
+        external
+        onlyRole(APPROVER_ROLE)
+        whenNotPaused
+    {
         YieldAllocation storage allocation = yieldAllocations[allocationId];
         if (allocation.status == GovernanceStatus.None) revert ProposalNotFound();
         if (allocation.status != GovernanceStatus.Pending) revert InvalidProposalStatus();
@@ -248,7 +273,10 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     function cancelYieldAllocation(uint256 allocationId) external {
         YieldAllocation storage allocation = yieldAllocations[allocationId];
         if (allocation.status == GovernanceStatus.None) revert ProposalNotFound();
-        if (allocation.status != GovernanceStatus.Pending && allocation.status != GovernanceStatus.Approved) {
+        if (
+            allocation.status != GovernanceStatus.Pending
+                && allocation.status != GovernanceStatus.Approved
+        ) {
             revert InvalidProposalStatus();
         }
         if (
@@ -260,7 +288,12 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         emit YieldAllocationCancelled(allocationId, msg.sender);
     }
 
-    function executeYieldAllocation(uint256 allocationId) external onlyRole(EXECUTOR_ROLE) whenNotPaused nonReentrant {
+    function executeYieldAllocation(uint256 allocationId)
+        external
+        onlyRole(EXECUTOR_ROLE)
+        whenNotPaused
+        nonReentrant
+    {
         YieldAllocation storage allocation = yieldAllocations[allocationId];
         if (allocation.status != GovernanceStatus.Approved) revert InvalidProposalStatus();
         if (block.timestamp < allocation.executableAt) revert TimelockNotElapsed();
@@ -275,10 +308,16 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     }
 
     /// @notice Starts the terminal dissolution process while the fund is paused.
-    function initiateDissolution(bytes32 resolutionHash, string calldata metadataURI) external onlyRole(CONFIG_ROLE) {
+    function initiateDissolution(bytes32 resolutionHash, string calldata metadataURI)
+        external
+        onlyRole(CONFIG_ROLE)
+    {
         _requireFundActive();
         if (!paused() || !treasury.paused()) revert FundNotPaused();
-        if (dissolution.status == GovernanceStatus.Pending || dissolution.status == GovernanceStatus.Approved) {
+        if (
+            dissolution.status == GovernanceStatus.Pending
+                || dissolution.status == GovernanceStatus.Approved
+        ) {
             revert DissolutionPending();
         }
 
@@ -297,7 +336,9 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         });
         treasury.beginDissolution();
 
-        emit DissolutionInitiated(msg.sender, resolutionHash, metadataURI, createdAt + DISSOLUTION_VALIDITY);
+        emit DissolutionInitiated(
+            msg.sender, resolutionHash, metadataURI, createdAt + DISSOLUTION_VALIDITY
+        );
     }
 
     function approveDissolution() external onlyRole(APPROVER_ROLE) {
@@ -317,7 +358,10 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
     }
 
     function cancelDissolution() external {
-        if (dissolution.status != GovernanceStatus.Pending && dissolution.status != GovernanceStatus.Approved) {
+        if (
+            dissolution.status != GovernanceStatus.Pending
+                && dissolution.status != GovernanceStatus.Approved
+        ) {
             revert InvalidProposalStatus();
         }
         if (
@@ -374,11 +418,22 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         proposalProposer[proposalId] = msg.sender;
 
         emit GrantProposalCreated(
-            proposalId, msg.sender, recipient, amount, purposeId, evidenceHash, metadataURI, expiresAt
+            proposalId,
+            msg.sender,
+            recipient,
+            amount,
+            purposeId,
+            evidenceHash,
+            metadataURI,
+            expiresAt
         );
     }
 
-    function approveGrantProposal(uint256 proposalId) external onlyRole(APPROVER_ROLE) whenNotPaused {
+    function approveGrantProposal(uint256 proposalId)
+        external
+        onlyRole(APPROVER_ROLE)
+        whenNotPaused
+    {
         GrantProposal storage proposal = _getProposal(proposalId);
         if (proposal.status != GrantStatus.Pending) revert InvalidProposalStatus();
         if (block.timestamp > proposal.expiresAt) revert ProposalExpired();
@@ -411,7 +466,12 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         emit GrantProposalCancelled(proposalId, msg.sender);
     }
 
-    function executeGrantProposal(uint256 proposalId) external onlyRole(EXECUTOR_ROLE) whenNotPaused nonReentrant {
+    function executeGrantProposal(uint256 proposalId)
+        external
+        onlyRole(EXECUTOR_ROLE)
+        whenNotPaused
+        nonReentrant
+    {
         GrantProposal storage proposal = _getProposal(proposalId);
         if (proposal.status != GrantStatus.Approved) revert InvalidProposalStatus();
         if (block.timestamp < proposal.executableAt) revert TimelockNotElapsed();
@@ -430,12 +490,16 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         uint64 timelockDuration_,
         uint64 proposalValidityPeriod_
     ) external onlyRole(CONFIG_ROLE) whenNotPaused {
-        _validateConfiguration(maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_);
+        _validateConfiguration(
+            maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_
+        );
         maxGrantAmount = maxGrantAmount_;
         requiredApprovals = requiredApprovals_;
         timelockDuration = timelockDuration_;
         proposalValidityPeriod = proposalValidityPeriod_;
-        emit ConfigurationUpdated(maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_);
+        emit ConfigurationUpdated(
+            maxGrantAmount_, requiredApprovals_, timelockDuration_, proposalValidityPeriod_
+        );
     }
 
     function pause() external onlyRole(GUARDIAN_ROLE) {
@@ -446,7 +510,10 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
 
     function unpause() external {
         _requireFundActive();
-        if (dissolution.status == GovernanceStatus.Pending || dissolution.status == GovernanceStatus.Approved) {
+        if (
+            dissolution.status == GovernanceStatus.Pending
+                || dissolution.status == GovernanceStatus.Approved
+        ) {
             revert DissolutionPending();
         }
         if (
@@ -467,7 +534,11 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         return proposals[proposalId];
     }
 
-    function getYieldAllocation(uint256 allocationId) external view returns (YieldAllocation memory) {
+    function getYieldAllocation(uint256 allocationId)
+        external
+        view
+        returns (YieldAllocation memory)
+    {
         return yieldAllocations[allocationId];
     }
 
@@ -475,7 +546,11 @@ contract GrantController is AccessControlDefaultAdminRules, Pausable, Reentrancy
         return dissolution;
     }
 
-    function _getProposal(uint256 proposalId) internal view returns (GrantProposal storage proposal) {
+    function _getProposal(uint256 proposalId)
+        internal
+        view
+        returns (GrantProposal storage proposal)
+    {
         proposal = proposals[proposalId];
         if (proposal.status == GrantStatus.None) revert ProposalNotFound();
     }

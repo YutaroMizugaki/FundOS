@@ -41,7 +41,8 @@ contract DeployFundOS is Script {
         uint256 maxGrantAmount = vm.envOr("MAX_GRANT_AMOUNT", JPYC.yen(500_000));
         uint8 requiredApprovals = uint8(vm.envOr("REQUIRED_APPROVALS", uint256(2)));
         uint64 timelockDuration = uint64(vm.envOr("TIMELOCK_DURATION", uint256(2 days)));
-        uint64 proposalValidityPeriod = uint64(vm.envOr("PROPOSAL_VALIDITY_PERIOD", uint256(14 days)));
+        uint64 proposalValidityPeriod =
+            uint64(vm.envOr("PROPOSAL_VALIDITY_PERIOD", uint256(14 days)));
 
         vm.startBroadcast();
 
@@ -50,8 +51,9 @@ contract DeployFundOS is Script {
             jpycAddress = address(deployment.mockJpyc);
         }
 
-        deployment.constitution =
-            new FundConstitution(fundName, purposeHash, purposeURI, dissolutionRecipient, IERC20(jpycAddress));
+        deployment.constitution = new FundConstitution(
+            fundName, purposeHash, purposeURI, dissolutionRecipient, IERC20(jpycAddress)
+        );
 
         deployment.treasury = new TreasuryVault(deployment.constitution);
 

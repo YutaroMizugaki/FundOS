@@ -27,7 +27,11 @@ contract FundOSHandler is Test {
     constructor() {
         jpyc = new MockJPYC();
         FundConstitution constitution = new FundConstitution(
-            "Invariant Fund", keccak256("inv"), "ipfs://inv", makeAddr("admin"), IERC20(address(jpyc))
+            "Invariant Fund",
+            keccak256("inv"),
+            "ipfs://inv",
+            makeAddr("admin"),
+            IERC20(address(jpyc))
         );
         treasury = new TreasuryVault(constitution);
         controller = new GrantController(
@@ -98,7 +102,10 @@ contract FundOSInvariantTest is StdInvariant, Test {
 
     function invariant_balance_covers_accounting() public view {
         TreasuryVault treasury = handler.treasury();
-        assertGe(treasury.totalTreasuryAssets(), treasury.protectedPrincipal() + treasury.availableGrantBudget());
+        assertGe(
+            treasury.totalTreasuryAssets(),
+            treasury.protectedPrincipal() + treasury.availableGrantBudget()
+        );
     }
 
     function invariant_principal_never_decreases_from_grants() public view {

@@ -52,7 +52,11 @@ contract FundOSTest is Test {
     function setUp() public {
         jpyc = new MockJPYC();
         constitution = new FundConstitution(
-            "FundOS Test Fund", keccak256("test-purpose"), "ipfs://test", admin, IERC20(address(jpyc))
+            "FundOS Test Fund",
+            keccak256("test-purpose"),
+            "ipfs://test",
+            admin,
+            IERC20(address(jpyc))
         );
         treasury = new TreasuryVault(constitution);
         controller = new GrantController(
@@ -131,10 +135,9 @@ contract FundOSTest is Test {
 
     function _createProposal(uint256 amount) internal returns (uint256 id) {
         vm.prank(proposer);
-        return
-            controller.createGrantProposal(
-                recipient, amount, keccak256("purpose"), keccak256("evidence"), "ipfs://meta"
-            );
+        return controller.createGrantProposal(
+            recipient, amount, keccak256("purpose"), keccak256("evidence"), "ipfs://meta"
+        );
     }
 
     function _approveTwice(uint256 id) internal {
@@ -249,7 +252,9 @@ contract FundOSTest is Test {
         assertEq(jpyc.balanceOf(recipient), grant);
         assertEq(treasury.availableGrantBudget(), budgetBefore - grant);
         assertEq(treasury.protectedPrincipal(), principalBefore);
-        assertEq(uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Executed));
+        assertEq(
+            uint8(controller.getProposal(id).status), uint8(GrantController.GrantStatus.Executed)
+        );
     }
 
     function test_executed_proposal_cannot_reexecute() public {
@@ -404,7 +409,8 @@ contract FundOSTest is Test {
     function _createAndApproveYield(uint256 amount) internal returns (uint256 allocationId) {
         jpyc.mint(address(treasury), amount);
         vm.prank(config);
-        allocationId = controller.createYieldAllocation(amount, keccak256("yield-statement"), "ipfs://yield");
+        allocationId =
+            controller.createYieldAllocation(amount, keccak256("yield-statement"), "ipfs://yield");
         vm.prank(approver1);
         controller.approveYieldAllocation(allocationId);
         vm.prank(approver2);
@@ -560,8 +566,9 @@ contract FundOSTest is Test {
     function test_reentrancy_blocked_on_grant_execution() public {
         MaliciousJPYC malicious = new MaliciousJPYC();
         address localDonor = makeAddr("localDonor");
-        FundConstitution localConstitution =
-            new FundConstitution("Malicious", keccak256("m"), "ipfs://m", admin, IERC20(address(malicious)));
+        FundConstitution localConstitution = new FundConstitution(
+            "Malicious", keccak256("m"), "ipfs://m", admin, IERC20(address(malicious))
+        );
         TreasuryVault localTreasury = new TreasuryVault(localConstitution);
         GrantController localController = new GrantController(
             localConstitution,
@@ -588,7 +595,9 @@ contract FundOSTest is Test {
         vm.stopPrank();
 
         vm.prank(proposer);
-        uint256 id = localController.createGrantProposal(recipient, JPYC.yen(10_000), bytes32(0), bytes32(0), "");
+        uint256 id = localController.createGrantProposal(
+            recipient, JPYC.yen(10_000), bytes32(0), bytes32(0), ""
+        );
         vm.prank(approver1);
         localController.approveGrantProposal(id);
         vm.warp(block.timestamp + 2 days);
@@ -598,7 +607,9 @@ contract FundOSTest is Test {
         localController.executeGrantProposal(id);
     }
 
-    function testFuzz_donations_maintain_invariant(uint96 principalAmount, uint96 budgetAmount) public {
+    function testFuzz_donations_maintain_invariant(uint96 principalAmount, uint96 budgetAmount)
+        public
+    {
         principalAmount = uint96(bound(principalAmount, 1, JPYC.yen(1_000_000)));
         budgetAmount = uint96(bound(budgetAmount, 1, JPYC.yen(1_000_000)));
 
@@ -611,6 +622,9 @@ contract FundOSTest is Test {
         treasury.fundGrantBudget(budgetAmount, bytes32(uint256(2)));
         vm.stopPrank();
 
-        assertGe(treasury.totalTreasuryAssets(), treasury.protectedPrincipal() + treasury.availableGrantBudget());
+        assertGe(
+            treasury.totalTreasuryAssets(),
+            treasury.protectedPrincipal() + treasury.availableGrantBudget()
+        );
     }
 }
